@@ -294,6 +294,7 @@ const Wanderer = () => {
     // 1 = normal (no country selection), 2 = open (half the screen, with country selection)
     const [sheetLevel, setSheetLevel] = useState(1);
     const touchStartY = useRef(null);
+    const touchStartTime = useRef(0);
     const sheetOpen = isPhone && sheetLevel === 2;
     const minimized = isPhone && sheetLevel === 0;
     const showCountries = !isPhone || sheetLevel === 2;
@@ -301,14 +302,20 @@ const Wanderer = () => {
     function handleTouchStart(e) {
         // Swipes inside the country selection are for scrolling, not for the sheet
         touchStartY.current = e.target.closest('.sheet-extra') ? null : e.touches[0].clientY;
+        touchStartTime.current = e.timeStamp;
     }
 
     function handleTouchEnd(e) {
         if (touchStartY.current === null) return;
         const dy = e.changedTouches[0].clientY - touchStartY.current;
-        if (dy < -40) setSheetLevel((level) => Math.min(level + 1, 2)); // swipe up
-        if (dy > 40) setSheetLevel((level) => Math.max(level - 1, 0)); // swipe down
         touchStartY.current = null;
+        if (Math.abs(dy) < 40) return; // too small to be a swipe
+
+        // A hard swipe (fast flick or long drag) jumps two levels
+        const speed = Math.abs(dy) / Math.max(e.timeStamp - touchStartTime.current, 1); // px per ms
+        const hard = speed > 1.2 || Math.abs(dy) > 200;
+        const step = (hard ? 2 : 1) * (dy < 0 ? 1 : -1); // up = higher level
+        setSheetLevel((level) => Math.min(Math.max(level + step, 0), 2));
     }
     const [messageApi, messageContext] = message.useMessage();
 
@@ -403,19 +410,23 @@ const Wanderer = () => {
                 {!isPhone && <MiniMap apiKey={API_KEY} position={position} className="minimap" />}
                 {/* Both views stay rendered so switching between minimized and normal can slide (see .sheet-section) */}
                 <div className={`sheet-section${minimized ? '' : ' collapsed'}`}>
-                    <LocationInfo data={panoData} dates={dates} current={current} onDateChange={setMonth} compact />
+                    <div className="sheet-section-inner">
+                        <LocationInfo data={panoData} dates={dates} current={current} onDateChange={setMonth} compact />
+                    </div>
                 </div>
                 <div className={`sheet-section${minimized ? ' collapsed' : ''}`}>
-                    <LocationInfo data={panoData} dates={dates} current={current} onDateChange={setMonth} />
-                    <Input.Search
-                        value={coordsInput}
-                        onChange={(e) => setCoordsInput(e.target.value)}
-                        onFocus={(e) => e.target.select()} // so pasting replaces the old coordinates
-                        onSearch={handleGoTo}
-                        placeholder="lat, lng"
-                        enterButton={<AimOutlined />}
-                        disabled={loading}
-                    />
+                    <div className="sheet-section-inner">
+                        <LocationInfo data={panoData} dates={dates} current={current} onDateChange={setMonth} />
+                        <Input.Search
+                            value={coordsInput}
+                            onChange={(e) => setCoordsInput(e.target.value)}
+                            onFocus={(e) => e.target.select()} // so pasting replaces the old coordinates
+                            onSearch={handleGoTo}
+                            placeholder="lat, lng"
+                            enterButton={<AimOutlined />}
+                            disabled={loading}
+                        />
+                    </div>
                 </div>
                 <Button color={"cyan"} variant="solid" icon={<CompassOutlined />} onClick={handleRandom} loading={loading} block>
                     {loading ? 'Searching...' : 'Random location'}

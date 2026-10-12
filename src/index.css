@@ -39,20 +39,26 @@ body {
     padding: 12px !important;
 }
 
-/* Panel parts that slide in/out when the phone sheet is minimized or restored */
+/* Panel parts that slide in/out when the phone sheet is minimized or restored.
+   Animating grid rows 0fr <-> 1fr follows the real content height (max-height would lag and make the panel jump) */
 .sheet-section {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    max-height: 400px;
-    overflow: hidden;
-    transition: max-height 0.3s ease, opacity 0.3s ease, margin-top 0.3s ease;
+    display: grid;
+    grid-template-rows: 1fr;
+    transition: grid-template-rows 0.3s ease, opacity 0.3s ease, margin-top 0.3s ease;
 }
 
 .sheet-section.collapsed {
-    max-height: 0;
+    grid-template-rows: 0fr;
     margin-top: -8px; /* cancel the panel gap while hidden */
     opacity: 0;
+}
+
+.sheet-section-inner {
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
 .flag {
