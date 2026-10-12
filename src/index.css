@@ -39,6 +39,22 @@ body {
     padding: 12px !important;
 }
 
+/* Panel parts that slide in/out when the phone sheet is minimized or restored */
+.sheet-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 400px;
+    overflow: hidden;
+    transition: max-height 0.3s ease, opacity 0.3s ease, margin-top 0.3s ease;
+}
+
+.sheet-section.collapsed {
+    max-height: 0;
+    margin-top: -8px; /* cancel the panel gap while hidden */
+    opacity: 0;
+}
+
 .flag {
     margin-right: 6px;
     vertical-align: -2px;

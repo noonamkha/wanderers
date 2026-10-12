@@ -98,17 +98,43 @@ function panoDates(data) {
 }
 
 // Place name, country and capture date of the current panorama, with a picker when there are several dates
-const LocationInfo = ({ data, dates, current, onDateChange }) => {
+// compact: a single row with the country on the left and the date on the right (minimized phone sheet)
+const LocationInfo = ({ data, dates, current, onDateChange, compact }) => {
     const { modeTheme, setModeTheme } = useContext(ModeThemeContext);
     if (!data) return null;
     const country = countryAt(data.location.latLng.toJSON());
+
+    const countryName = (
+        <Typography.Text strong>
+            {country && <img src={country.flag} width={20} height={15} alt="" className="flag" />}
+            {country?.name || 'Unknown country'}
+        </Typography.Text>
+    );
+    const date = dates.length > 1 ? (
+        <Select
+            size="small"
+            value={current.pano}
+            onChange={(pano) => onDateChange(dates.find((d) => d.pano === pano).month)}
+            options={dates.map((d) => ({ value: d.pano, label: formatMonth(d.month) }))}
+            style={{ width: 160 }}
+        />
+    ) : (
+        <Typography.Text type="secondary">{formatMonth(current.month)}</Typography.Text>
+    );
+
+    if (compact) {
+        return (
+            <Flex align="center" justify="space-between" gap={8} className="location-info">
+                {countryName}
+                {date}
+            </Flex>
+        );
+    }
+
     return (
         <Flex vertical gap={2} className="location-info">
             <Flex align='center' justify='space-between'>
-                <Typography.Text strong>
-                    {country && <img src={country.flag} width={20} height={15} alt="" className="flag" />}
-                    {country?.name || 'Unknown country'}
-                </Typography.Text>
+                {countryName}
                 <Switch
                     styles={{
                         root: {
@@ -153,17 +179,7 @@ const LocationInfo = ({ data, dates, current, onDateChange }) => {
             </Space>
             <Space>
                 <Typography.Text type="secondary"><ClockCircleOutlined /></Typography.Text>
-                {dates.length > 1 ? (
-                    <Select
-                        size="small"
-                        value={current.pano}
-                        onChange={(pano) => onDateChange(dates.find((d) => d.pano === pano).month)}
-                        options={dates.map((d) => ({ value: d.pano, label: formatMonth(d.month) }))}
-                        style={{ width: 160 }}
-                    />
-                ) : (
-                    <Typography.Text type="secondary">{formatMonth(current.month)}</Typography.Text>
-                )}
+                {date}
             </Space>
         </Flex>
     );
@@ -274,10 +290,13 @@ const Wanderer = () => {
     const [loading, setLoading] = useState(false);
     const [coordsInput, setCoordsInput] = useState('');
     const isPhone = useIsPhone();
-    // Phone: the bottom sheet hides the country selection until swiped up
-    const [sheetOpen, setSheetOpen] = useState(false);
+    // Phone bottom sheet levels, changed by swiping: 0 = minimized (country, date, random button),
+    // 1 = normal (no country selection), 2 = open (half the screen, with country selection)
+    const [sheetLevel, setSheetLevel] = useState(1);
     const touchStartY = useRef(null);
-    const showCountries = !isPhone || sheetOpen;
+    const sheetOpen = isPhone && sheetLevel === 2;
+    const minimized = isPhone && sheetLevel === 0;
+    const showCountries = !isPhone || sheetLevel === 2;
 
     function handleTouchStart(e) {
         // Swipes inside the country selection are for scrolling, not for the sheet
@@ -287,8 +306,8 @@ const Wanderer = () => {
     function handleTouchEnd(e) {
         if (touchStartY.current === null) return;
         const dy = e.changedTouches[0].clientY - touchStartY.current;
-        if (dy < -40) setSheetOpen(true); // swipe up
-        if (dy > 40) setSheetOpen(false); // swipe down
+        if (dy < -40) setSheetLevel((level) => Math.min(level + 1, 2)); // swipe up
+        if (dy > 40) setSheetLevel((level) => Math.max(level - 1, 0)); // swipe down
         touchStartY.current = null;
     }
     const [messageApi, messageContext] = message.useMessage();
@@ -373,25 +392,31 @@ const Wanderer = () => {
             {isPhone && <MiniMap apiKey={API_KEY} position={position} className="minimap minimap-floating" />}
             {/* Card body is a flex column (see .panel-body) so only the country list scrolls */}
             <Card
-                className={`panel${isPhone && sheetOpen ? " open" : ""}`}
+                className={`panel${sheetOpen ? " open" : ""}`}
                 classNames={{ body: 'panel-body' }}
                 onTouchStart={isPhone ? handleTouchStart : undefined}
                 onTouchEnd={isPhone ? handleTouchEnd : undefined}
                 onTouchCancel={() => { touchStartY.current = null; }}
             >
                 {/* Phone: drag handle, also tappable */}
-                {isPhone && <div className="sheet-handle" onClick={() => setSheetOpen(!sheetOpen)} />}
+                {isPhone && <div className="sheet-handle" onClick={() => setSheetLevel(sheetLevel === 2 ? 1 : sheetLevel + 1)} />}
                 {!isPhone && <MiniMap apiKey={API_KEY} position={position} className="minimap" />}
-                <LocationInfo data={panoData} dates={dates} current={current} onDateChange={setMonth} />
-                <Input.Search
-                    value={coordsInput}
-                    onChange={(e) => setCoordsInput(e.target.value)}
-                    onFocus={(e) => e.target.select()} // so pasting replaces the old coordinates
-                    onSearch={handleGoTo}
-                    placeholder="lat, lng"
-                    enterButton={<AimOutlined />}
-                    disabled={loading}
-                />
+                {/* Both views stay rendered so switching between minimized and normal can slide (see .sheet-section) */}
+                <div className={`sheet-section${minimized ? '' : ' collapsed'}`}>
+                    <LocationInfo data={panoData} dates={dates} current={current} onDateChange={setMonth} compact />
+                </div>
+                <div className={`sheet-section${minimized ? ' collapsed' : ''}`}>
+                    <LocationInfo data={panoData} dates={dates} current={current} onDateChange={setMonth} />
+                    <Input.Search
+                        value={coordsInput}
+                        onChange={(e) => setCoordsInput(e.target.value)}
+                        onFocus={(e) => e.target.select()} // so pasting replaces the old coordinates
+                        onSearch={handleGoTo}
+                        placeholder="lat, lng"
+                        enterButton={<AimOutlined />}
+                        disabled={loading}
+                    />
+                </div>
                 <Button color={"cyan"} variant="solid" icon={<CompassOutlined />} onClick={handleRandom} loading={loading} block>
                     {loading ? 'Searching...' : 'Random location'}
                 </Button>
