@@ -374,7 +374,7 @@ const Wanderer = () => {
             {isPhone && <MiniMap apiKey={API_KEY} position={position} className="minimap minimap-floating" />}
             {/* Card body is a flex column (see .panel-body) so only the country list scrolls */}
             <Card
-                className="panel"
+                className={`panel${isPhone && sheetOpen ? " open" : ""}`}
                 classNames={{ body: 'panel-body' }}
                 onTouchStart={isPhone ? handleTouchStart : undefined}
                 onTouchEnd={isPhone ? handleTouchEnd : undefined}

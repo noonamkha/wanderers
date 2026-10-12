@@ -100,9 +100,21 @@ body {
         right: 0;
         bottom: 0;
         width: auto;
-        max-height: 45dvh;
+        max-height: 50dvh;
         border-radius: 12px 12px 0 0;
         border-bottom: 0;
+        /* Lets height animate from auto (Chrome/Edge; other browsers just jump) */
+        interpolate-size: allow-keywords;
+        transition: height 0.3s ease;
+    }
+
+    /* Swiped up: the sheet takes half the screen */
+    .panel.open {
+        height: 50dvh;
+    }
+
+    .panel.open .panel-body {
+        flex: 1;
     }
 
     /* Country selection slides open/closed */
@@ -115,7 +127,8 @@ body {
     }
 
     .panel-body > .sheet-extra.open {
-        max-height: 45dvh;
+        flex: 1;
+        max-height: 50dvh;
         margin-top: 0;
         opacity: 1;
     }
