@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "gadm": "node scripts/download-gadm.mjs",
+    "gadm:index": "node scripts/build-gadm-index.mjs",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -17,6 +19,7 @@
     "@turf/bbox": "^7.4.0",
     "@turf/boolean-point-in-polygon": "^7.4.0",
     "antd": "^6.6.5",
+    "fflate": "^0.8.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

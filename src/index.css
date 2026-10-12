@@ -30,6 +30,18 @@ body {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
 }
 
+/* Desktop: invisible grab area on the panel's right edge for resizing */
+.panel-resize {
+    position: absolute;
+    top: 0;
+    right: -4px;
+    bottom: 0;
+    width: 8px;
+    cursor: ew-resize;
+    touch-action: none;
+    z-index: 2;
+}
+
 /* Card body fills the card and stacks its content */
 .panel-body {
     display: flex;
@@ -44,6 +56,7 @@ body {
 .sheet-section {
     display: grid;
     grid-template-rows: 1fr;
+    grid-template-columns: minmax(0, 1fr); /* don't widen to fit long one-line content (e.g. country names) */
     transition: grid-template-rows 0.3s ease, opacity 0.3s ease, margin-top 0.3s ease;
 }
 
@@ -55,10 +68,18 @@ body {
 
 .sheet-section-inner {
     min-height: 0;
+    min-width: 0;
     overflow: hidden;
     display: flex;
     flex-direction: column;
     gap: 8px;
+}
+
+/* Desktop never minimizes, so visible sections don't need clipping (it would cut off the location card's shadow) */
+@media (min-width: 601px) {
+    .sheet-section:not(.collapsed) > .sheet-section-inner {
+        overflow: visible;
+    }
 }
 
 .logo {
@@ -74,6 +95,27 @@ body {
     margin-right: 6px;
     vertical-align: -2px;
     border-radius: 2px;
+}
+
+/* Narrow-down cascader under the selected country in the tree */
+.tree-node-extra {
+    padding: 4px 0;
+    cursor: default;
+}
+
+/* Let the tree row (and the cascader in it) shrink to the panel width instead of overflowing sideways */
+.country-list .ant-tree-node-content-wrapper,
+.country-list .ant-tree-title {
+    min-width: 0;
+}
+
+.country-list .ant-tree-title {
+    display: block;
+}
+
+.tree-node-extra .ant-cascader {
+    min-width: 0;
+    max-width: 100%;
 }
 
 /* Only the country list scrolls; everything else in the panel keeps its size */
@@ -101,6 +143,31 @@ body {
     flex-shrink: 0;
     border: 0;
     border-radius: 8px;
+}
+
+/* Mini map as the location card's cover: only round the top corners */
+.location-card .minimap {
+    display: block;
+    border-radius: 8px 8px 0 0;
+}
+
+/* Location card's mini map shrinks/grows in height (grid rows 0fr <-> 1fr follow its real height), no fade */
+/* Extra specificity: antd styles every card cover child as display: block, which would cancel the grid */
+.location-card .ant-card-cover > .map-reveal {
+    display: grid;
+    grid-template-rows: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    transition: grid-template-rows 0.3s ease;
+}
+
+.location-card .ant-card-cover > .map-reveal.collapsed {
+    grid-template-rows: 0fr;
+}
+
+.map-reveal-inner {
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
 }
 
 /* Phone: mini map floats in the top right */
@@ -131,7 +198,7 @@ body {
         right: 0;
         bottom: 0;
         width: auto;
-        max-height: 70dvh;
+        max-height: 80dvh;
         border-radius: 12px 12px 0 0;
         border-bottom: 0;
         /* Lets height animate from auto (Chrome/Edge; other browsers just jump) */
@@ -151,7 +218,7 @@ body {
 
     /* Swiped up: the sheet takes half the screen */
     .panel.open {
-        height: 70dvh;
+        height: 80dvh;
     }
 
     .panel.open .panel-body {
@@ -169,7 +236,7 @@ body {
 
     .panel-body > .sheet-extra.open {
         flex: 1;
-        max-height: 70dvh;
+        max-height: 80dvh;
         margin-top: 0;
         opacity: 1;
     }

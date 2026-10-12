@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState, createContext, useContext } from 'react';
 import { yellow, grey } from '@ant-design/colors';
-import { Button, Checkbox, Collapse, Flex, Input, Select, Switch, Typography, message, Space, ConfigProvider, theme, Card } from 'antd';
+import { Button, Flex, Input, Select, Switch, Typography, message, Space, ConfigProvider, theme, Card, Tree, Cascader, Checkbox } from 'antd';
 import { AimOutlined, CompassOutlined, EnvironmentOutlined, ClockCircleOutlined, UserOutlined, MoonFilled, SunFilled } from '@ant-design/icons';
 import { setOptions, importLibrary } from '@googlemaps/js-api-loader';
 import logo from './assets/nu-tetris.svg';
-import { COUNTRIES, CONTINENTS, isInCountry, randomPointIn } from './countries';
+import { COUNTRIES, CONTINENTS, prettyName, loadLevel, areaFeature, isInFeature, randomPointIn, countryAt } from './gadm';
 import NuTetris from "./assets/nu-tetris.svg?raw"
 // Set in .env.local (not committed): VITE_GOOGLE_MAPS_API_KEY=...
 // It still ends up in the built JS, so restrict the key in Google Cloud Console
@@ -62,24 +62,29 @@ const randomPointOnEarth = () => ({
     lng: Math.random() * 360 - 180,
 });
 
-// Keep picking random points until one has Street View nearby (inside the chosen country, if any)
-async function findRandomPano(countries) {
+// Search radius for an area: about a quarter of its size, between 1 and 50 km, so small districts aren't overshot
+function searchRadius({ bbox: [west, south, east, north] }) {
+    const km = Math.hypot((east - west) * 111 * Math.cos(((south + north) / 2) * Math.PI / 180), (north - south) * 111);
+    return Math.min(Math.max((km * 1000) / 4, 1000), 50000);
+}
+
+// Keep picking random points until one has Street View nearby (inside one of the chosen areas, if any).
+// Returns { data, box }: the panorama and the bounding box of the area it was found in (null for anywhere)
+async function findRandomPano(areas) {
     for (let i = 0; i < 50; i++) {
-        const country = countries[Math.floor(Math.random() * countries.length)];
-        const point = country ? randomPointIn(country) : randomPointOnEarth();
+        const area = areas[Math.floor(Math.random() * areas.length)];
+        const feature = area ? await areaFeature(area) : null;
+        const point = feature ? randomPointIn(feature) : randomPointOnEarth();
         if (!point) continue;
         try {
-            const data = await findPano(point);
-            if (!country || isInCountry(country, data.location.latLng.toJSON())) return data;
+            const data = await findPano(point, feature ? searchRadius(feature) : 50000);
+            if (!feature || isInFeature(feature, data.location.latLng.toJSON())) return { data, box: feature?.bbox ?? null };
         } catch {
             // no imagery here, try again
         }
     }
     throw new Error('No panorama found');
 }
-
-// Country containing a point, checked locally against the borders (free)
-const countryAt = (point) => Object.values(COUNTRIES).find((c) => isInCountry(c, point));
 
 const formatMonth = (month) =>
     month ? new Date(`${month}-01`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }) : 'Unknown date';
@@ -126,14 +131,16 @@ const ThemeSwitch = () => {
 }
 
 // compact: a single row with the country on the left and the date on the right (minimized phone sheet)
-const LocationInfo = ({ data, dates, current, onDateChange, compact }) => {
+// country: from countryAt(), undefined while it's still being looked up
+// countryExtra: shown at the right end of the country row
+const LocationInfo = ({ data, country, dates, current, onDateChange, compact, countryExtra }) => {
     if (!data) return null;
-    const country = countryAt(data.location.latLng.toJSON());
 
     const countryName = (
-        <Typography.Text strong>
+        // One line with "…" when too long (full name in a tooltip); flex lets it shrink next to the date / Map checkbox
+        <Typography.Text strong ellipsis={{ tooltip: country?.name }} style={{ flex: 1, minWidth: 0 }}>
             {country && <img src={country.flag} width={20} height={15} alt="" className="flag" />}
-            {country?.name || 'Unknown country'}
+            {country === undefined ? '…' : country?.name || 'Unknown country'}
         </Typography.Text>
     );
     const date = dates.length > 1 ? (
@@ -159,7 +166,10 @@ const LocationInfo = ({ data, dates, current, onDateChange, compact }) => {
 
     return (
         <Flex vertical gap={2} className="location-info">
-            {countryName}
+            <Flex align="center" justify="space-between" gap={8}>
+                {countryName}
+                {countryExtra}
+            </Flex>
             {/* One line, click "more" to expand. key resets the expanded state for each new location */}
             <Space>
                 <EnvironmentOutlined />
@@ -203,12 +213,46 @@ const EmbedStreetView = ({ apiKey, pano }) => {
     );
 }
 
+// Web Mercator y of a latitude (what map zoom levels are based on)
+const mercatorY = (lat) => Math.log(Math.tan(Math.PI / 4 + (Math.min(Math.max(lat, -85), 85) * Math.PI) / 360));
+
+// Center and zoom that fit a bounding box [west, south, east, north] into a map of the given pixel size,
+// with a margin: the area fills at most ~80% of the map, so the surrounding areas show too
+function frameView([west, south, east, north], { width, height }) {
+    const [ySouth, yNorth] = [mercatorY(south), mercatorY(north)];
+    const zoomX = Math.log2((width * 360) / (256 * Math.max(east - west, 1e-6)));
+    const zoomY = Math.log2((height * 2 * Math.PI) / (256 * Math.max(yNorth - ySouth, 1e-9)));
+    const zoom = Math.min(Math.max(Math.floor(Math.min(zoomX, zoomY) - 0.3), 0), 18);
+    const lat = (Math.atan(Math.sinh((ySouth + yNorth) / 2)) * 180) / Math.PI;
+    return { center: `${lat},${(west + east) / 2}`, zoom };
+}
+
 // Small map showing the current location: Maps Embed API place mode, free and unlimited.
-// Changing the position reloads the iframe
-const MiniMap = ({ apiKey, position, className }) => {
-    if (!position) return null;
-    const params = new URLSearchParams({ key: apiKey, q: `${position.lat},${position.lng}`, zoom: 4 });
-    return <iframe src={`https://www.google.com/maps/embed/v1/place?${params}`} className={className} />;
+// view: { position, frame } where frame is the bounding box of the area to fit (selected area or country).
+// The iframe only reloads when the position, center or zoom actually change
+const MiniMap = ({ apiKey, view, className }) => {
+    const ref = useRef(null);
+    const [size, setSize] = useState(null);
+
+    useEffect(() => {
+        const observer = new ResizeObserver(([entry]) => {
+            const { width, height } = entry.contentRect;
+            if (width && height) setSize({ width, height });
+        });
+        observer.observe(ref.current);
+        return () => observer.disconnect();
+    }, [])
+
+    let src;
+    if (view && size) {
+        const { position, frame } = view;
+        const params = new URLSearchParams({ key: apiKey, q: `${position.lat},${position.lng}` });
+        const { center, zoom } = frame ? frameView(frame, size) : { center: `${position.lat},${position.lng}`, zoom: 4 };
+        params.set('center', center);
+        params.set('zoom', zoom);
+        src = `https://www.google.com/maps/embed/v1/place?${params}`;
+    }
+    return <iframe ref={ref} src={src} className={className} />;
 }
 
 const CONTINENT_EMOJI = {
@@ -218,56 +262,139 @@ const CONTINENT_EMOJI = {
     Oceania: '🦘',
     'North America': '🏔️',
     'South America': '💃',
+    Antarctica: '🐧',
 };
 
-const CountryPicker = ({ selected, onChange, multiple }) => {
-    // Single mode: clicking a country replaces the selection, clicking it again clears it
-    const toggle = (name) => {
-        if (selected.includes(name)) onChange(selected.filter((n) => n !== name));
-        else onChange(multiple ? [...selected, name] : [name]);
-    };
+// Continent > country tree with a single selection (a continent or a country).
+// Keys are GADM country codes, continents are "continent:<name>"
+const COUNTRY_TREE = CONTINENTS.map(([continent, countries]) => ({
+    key: `continent:${continent}`,
+    title: `${CONTINENT_EMOJI[continent] ?? '🌐'} ${continent}`,
+    children: countries.map((country) => ({
+        key: country.code,
+        title: <>{country.flag && <img src={country.flag} width={20} height={15} alt="" className="flag" />}{country.name}</>,
+        isLeaf: true,
+    })),
+}));
 
-    // Select every country in the continent, or deselect them all if they're already selected
-    const toggleAll = (countries) => {
-        const names = countries.map((c) => c.name);
-        const allSelected = names.every((n) => selected.includes(n));
-        onChange(allSelected
-            ? selected.filter((n) => !names.includes(n))
-            : [...new Set([...selected, ...names])]);
-    };
+// selectedExtra: shown right below the selected node (the narrow-down cascader for a country)
+const CountryPicker = ({ selected, onChange, selectedExtra }) => (
+    <Tree
+        blockNode
+        treeData={COUNTRY_TREE}
+        selectedKeys={selected ? [selected] : []}
+        onSelect={(keys) => onChange(keys[0] ?? null)} // clicking the selected node again clears it
+        titleRender={(node) => node.key === selected && selectedExtra ? (
+            <>
+                {node.title}
+                {/* Clicks and keys inside belong to the cascader, not the tree (no deselect, no tree navigation) */}
+                <div className="tree-node-extra" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                    {selectedExtra}
+                </div>
+            </>
+        ) : node.title}
+    />
+);
 
-    const items = Object.entries(CONTINENTS).map(([continent, countries]) => {
-        const count = countries.filter((c) => selected.includes(c.name)).length;
-        return {
-            key: continent,
-            label: `${CONTINENT_EMOJI[continent] ?? '🌐'} ${continent}${count ? ` (${count})` : ''}`,
-            children: (
-                <Flex vertical gap={4}>
-                    {multiple && (
-                        <Checkbox
-                            checked={count === countries.length}
-                            indeterminate={count > 0 && count < countries.length}
-                            onChange={() => toggleAll(countries)}
-                        >
-                            Select all
-                        </Checkbox>
-                    )}
-                    {countries.map(({ name, flag }) => (
-                        <Checkbox key={name} checked={selected.includes(name)} onChange={() => toggle(name)}>
-                            <img src={flag} width={20} height={15} alt="" className="flag" />
-                            {name}
-                        </Checkbox>
-                    ))}
-                </Flex>
-            ),
-        };
-    });
+// Display names of level 1 / 2 areas by GADM id, filled in as countries' options are built
+const AREA_NAMES = new Map();
 
-    return <Collapse size="small" ghost items={items} styles={{
-        header: {
-            padding: "2px 0px"
+// Cascader options for a country's level 1 (and level 2) areas, built from one GADM file:
+// the level 2 file also has each area's level 1 parent (GID_1, NAME_1)
+async function subAreaOptions(country) {
+    const level = Math.min(country.levels - 1, 2);
+    const data = await loadLevel(country.code, level);
+    const level1 = new Map();
+    for (const { properties: p } of data.features) {
+        const name1 = prettyName(p.NAME_1);
+        if (!level1.has(p.GID_1)) {
+            level1.set(p.GID_1, { value: p.GID_1, label: name1, children: level === 2 ? [] : undefined });
+            AREA_NAMES.set(p.GID_1, `${name1}, ${country.name}`);
         }
-    }} />;
+        if (level === 2) {
+            const name2 = prettyName(p.NAME_2);
+            level1.get(p.GID_1).children.push({ value: p.GID_2, label: name2 });
+            AREA_NAMES.set(p.GID_2, `${name2}, ${name1}, ${country.name}`);
+        }
+    }
+    const byLabel = (a, b) => a.label.localeCompare(b.label);
+    const options = [...level1.values()].sort(byLabel);
+    options.forEach((o) => o.children?.sort(byLabel));
+    return options;
+}
+
+// Optional narrowing of the selected country to a level 1 area, or a level 2 area inside it, with search.
+// value: path of GADM ids, e.g. ["VNM.1_1"] or ["VNM.1_1", "VNM.1.1_1"]
+const SubAreaPicker = ({ country, value, onChange }) => {
+    const [options, setOptions] = useState({}); // country code -> cascader options
+    const code = country?.levels > 1 ? country.code : null;
+
+    useEffect(() => {
+        if (!code || options[code]) return;
+        subAreaOptions(COUNTRIES[code])
+            .then((o) => setOptions((all) => ({ ...all, [code]: o })))
+            .catch(console.error);
+    }, [code]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    if (!code) return null;
+
+    return (
+        <Cascader
+            options={options[code] ?? []}
+            loading={!options[code]}
+            value={value}
+            onChange={(v) => onChange(v ?? [])}
+            changeOnSelect // a level 1 area can be picked without going down to level 2
+            showSearch={{
+                filter: (input, path) => path.some((o) => o.label.toLowerCase().includes(input.toLowerCase())),
+            }}
+            placeholder={`Narrow down within ${country.name} (optional)`}
+            allowClear
+            style={{ width: '100%', flexShrink: 0 }}
+        />
+    );
+}
+
+const countryArea = (country) => ({ code: country.code, level: 0, gid: country.code, name: country.name });
+
+// Areas to search for the selection: all countries of a continent (one is picked at random each try),
+// a country, or the level 1 / 2 area picked inside it
+function selectedAreas(selected, subArea) {
+    if (!selected) return [];
+    if (selected.startsWith('continent:')) {
+        const [, countries] = CONTINENTS.find(([continent]) => `continent:${continent}` === selected);
+        return countries.map(countryArea);
+    }
+    const country = COUNTRIES[selected];
+    if (!subArea.length) return [countryArea(country)];
+    const gid = subArea.at(-1);
+    return [{ code: country.code, level: subArea.length, gid, name: AREA_NAMES.get(gid) }];
+}
+
+// Text for the current selection
+function selectionLabel(selected, areas) {
+    if (!selected) return 'Anywhere';
+    if (selected.startsWith('continent:')) return selected.slice('continent:'.length);
+    return areas[0]?.name ?? '';
+}
+
+const PANEL_MIN_WIDTH = 250; // desktop panel width, px
+
+// Remembered per-browser preferences (storage can be unavailable, e.g. in private windows)
+function loadSetting(name) {
+    try {
+        return localStorage.getItem(name);
+    } catch {
+        return True;
+    }
+}
+
+function saveSetting(name, value) {
+    try {
+        localStorage.setItem(name, value);
+    } catch {
+        // not remembered, that's fine
+    }
 }
 
 // True on phone-sized screens (matches the CSS breakpoint). Phones show a smaller, floating mini map
@@ -290,9 +417,14 @@ const Wanderer = () => {
     const [ready, setReady] = useState(false);
     const [position, setPosition] = useState(null);
     const [panoData, setPanoData] = useState(null);
+    const [mapView, setMapView] = useState(null); // mini map: { position, frame }
+    const [country, setCountry] = useState(); // country of the current panorama, undefined while looking it up
+    const showCount = useRef(0);
     const [month, setMonth] = useState(null); // chosen capture date, null = latest
-    const [selected, setSelected] = useState([]);
-    const [multiple, setMultiple] = useState(false); // select one country at a time by default
+    const [selected, setSelected] = useState(null); // tree key: a continent or a country
+    const [subArea, setSubArea] = useState([]); // cascader path inside the selected country
+    const [showMap, setShowMap] = useState(() => loadSetting('showMap') !== 'false'); // desktop mini map
+    const [panelWidth, setPanelWidth] = useState(() => Number(loadSetting('panelWidth')) || PANEL_MIN_WIDTH); // desktop
     const [loading, setLoading] = useState(false);
     const [coordsInput, setCoordsInput] = useState('');
     const isPhone = useIsPhone();
@@ -304,7 +436,7 @@ const Wanderer = () => {
     const sheetOpen = isPhone && sheetLevel === 2;
     const minimized = isPhone && sheetLevel === 0;
     const showCountries = !isPhone || sheetLevel === 2;
-
+    let antdTheme = theme.useToken()
     function handleTouchStart(e) {
         // Swipes inside the country selection are for scrolling, not for the sheet
         touchStartY.current = e.target.closest('.sheet-extra') ? null : e.touches[0].clientY;
@@ -338,13 +470,30 @@ const Wanderer = () => {
     }, [messageApi])
 
     // Show a found panorama. The embed can't report its position, so take it from the lookup
-    function show(data, wantedMonth = null) {
+    // areaBox: bounding box of the selected area the panorama was found in; the mini map frames it
+    // (or the panorama's country if there's none)
+    function show(data, wantedMonth = null, areaBox = null) {
         const { lat, lng } = data.location.latLng.toJSON();
         setPosition({ lat, lng });
         setCoordsInput(`${lat}, ${lng}`); // same format as copied from Google Maps
         setPanoData(data);
         setMonth(wantedMonth);
+        // Look up the country from the GADM borders; ignore the answer if another location was shown meanwhile
+        const count = ++showCount.current;
+        setCountry(undefined);
+        countryAt({ lat, lng })
+            .catch((e) => {
+                console.error(e);
+                return null;
+            })
+            .then((c) => {
+                if (count !== showCount.current) return;
+                setCountry(c);
+                setMapView({ position: { lat, lng }, frame: areaBox ?? c?.box ?? null });
+            });
     }
+
+    const areas = selectedAreas(selected, subArea);
 
     // The panorama for the chosen date, or the latest one
     const dates = panoData ? panoDates(panoData) : [];
@@ -354,9 +503,10 @@ const Wanderer = () => {
         if (!ready) return;
         // Open the coordinates from the URL, or a random place if there are none
         const start = startFromUrl();
-        (start ? findNearestPano(start) : findRandomPano([]))
-            .then((data) => show(data, start ? dateFromUrl() : null))
-            .catch(console.error);
+        const found = start
+            ? findNearestPano(start).then((data) => show(data, dateFromUrl()))
+            : findRandomPano([]).then(({ data }) => show(data));
+        found.catch(console.error);
     }, [ready])
 
     // Keep the URL in sync with the current location and date
@@ -366,6 +516,38 @@ const Wanderer = () => {
         const date = current?.month ? `&date=${current.month}` : '';
         window.history.replaceState(null, '', `?${position.lat},${position.lng}${date}`);
     }, [position, current?.month])
+
+    // Desktop: drag the panel's right edge to resize it. Pointer capture keeps the drag going over the iframes
+    function handleResizeStart(e) {
+        e.preventDefault();
+        const handle = e.currentTarget;
+        const startX = e.clientX;
+        const startWidth = panelWidth;
+        let width = startWidth;
+        handle.setPointerCapture(e.pointerId);
+        const onMove = (ev) => {
+            const max = Math.max(PANEL_MIN_WIDTH, window.innerWidth - 40);
+            width = Math.min(Math.max(startWidth + ev.clientX - startX, PANEL_MIN_WIDTH), max);
+            setPanelWidth(width);
+        };
+        const onUp = () => {
+            handle.removeEventListener('pointermove', onMove);
+            handle.removeEventListener('pointerup', onUp);
+            saveSetting('panelWidth', String(Math.round(width)));
+        };
+        handle.addEventListener('pointermove', onMove);
+        handle.addEventListener('pointerup', onUp);
+    }
+
+    function toggleMap(show) {
+        setShowMap(show);
+        saveSetting('showMap', String(show));
+    }
+
+    function handleSelect(key) {
+        setSelected(key);
+        setSubArea([]);
+    }
 
     async function handleGoTo() {
         const coords = parseCoords(coordsInput);
@@ -386,53 +568,96 @@ const Wanderer = () => {
     async function handleRandom() {
         setLoading(true);
         try {
-            show(await findRandomPano(selected.map((name) => COUNTRIES[name])));
+            const { data, box } = await findRandomPano(areas);
+            show(data, null, box);
         } catch (e) {
             console.error(e);
-            messageApi.error('No Street View found, try again or pick other countries');
+            messageApi.error('No Street View found, try again or pick other areas');
         }
         setLoading(false);
     }
 
     if (!API_KEY) return <p>Missing VITE_GOOGLE_MAPS_API_KEY. Add it to .env.local and restart the dev server.</p>;
     if (!ready) return null;
-
+    console.log("antdTheme.token.boxShadow", antdTheme.token.boxShadow)
     return (
         <>
             {messageContext}
             <EmbedStreetView apiKey={API_KEY} pano={current?.pano} />
             {/* On phones the mini map floats in the top right, outside the bottom panel */}
-            {isPhone && <MiniMap apiKey={API_KEY} position={position} className="minimap minimap-floating" />}
+            {isPhone && <MiniMap apiKey={API_KEY} view={mapView} className="minimap minimap-floating" />}
             {/* Card body is a flex column (see .panel-body) so only the country list scrolls */}
             <Card
                 className={`panel${sheetOpen ? " open" : ""}`}
                 classNames={{ body: 'panel-body' }}
+                style={isPhone ? undefined : { width: panelWidth }}
                 onTouchStart={isPhone ? handleTouchStart : undefined}
                 onTouchEnd={isPhone ? handleTouchEnd : undefined}
                 onTouchCancel={() => { touchStartY.current = null; }}
             >
+                {/* Desktop: draggable right edge to resize the panel */}
+                {!isPhone && <div className="panel-resize" onPointerDown={handleResizeStart} />}
                 {/* Phone: drag handle, also tappable */}
                 {isPhone && <div className="sheet-handle" onClick={() => setSheetLevel(sheetLevel === 2 ? 1 : sheetLevel + 1)} />}
-                <Flex align="center" justify="space-between" gap={8}>
-                    {/* The logo is black; invert it to white in dark mode */}
-                    <img
-                        src={logo}
-                        alt="NuTetris"
-                        className="logo"
-                        style={{ filter: modeTheme === 'dark' ? 'invert(1)' : 'none', height: 18 }}
-                    />
-                    <ThemeSwitch />
-                </Flex>
-                {!isPhone && <MiniMap apiKey={API_KEY} position={position} className="minimap" />}
+                {/* Logo and theme switch, hidden (sliding) when the phone sheet is minimized */}
+                <div className={`sheet-section${minimized ? ' collapsed' : ''}`}>
+                    <div className="sheet-section-inner">
+                        <Flex align="center" justify="space-between" gap={8}>
+                            {/* The logo is black; invert it to white in dark mode */}
+                            <img
+                                src={logo}
+                                alt="NuTetris"
+                                className="logo"
+                                style={{ filter: modeTheme === 'dark' ? 'invert(1)' : 'none', height: 18 }}
+                            />
+                            <ThemeSwitch />
+                        </Flex>
+                    </div>
+                </div>
                 {/* Both views stay rendered so switching between minimized and normal can slide (see .sheet-section) */}
                 <div className={`sheet-section${minimized ? '' : ' collapsed'}`}>
                     <div className="sheet-section-inner">
-                        <LocationInfo data={panoData} dates={dates} current={current} onDateChange={setMonth} compact />
+                        <LocationInfo data={panoData} country={country} dates={dates} current={current} onDateChange={setMonth} compact />
                     </div>
                 </div>
                 <div className={`sheet-section${minimized ? ' collapsed' : ''}`}>
                     <div className="sheet-section-inner">
-                        <LocationInfo data={panoData} dates={dates} current={current} onDateChange={setMonth} />
+                        {isPhone ? (
+                            <LocationInfo data={panoData} country={country} dates={dates} current={current} onDateChange={setMonth} />
+                        ) : (
+                            // Desktop: mini map as the card's cover image, location info as its content
+                            <Card
+                                hoverable
+                                style={{
+                                    boxShadow: antdTheme.token.boxShadow
+                                }}
+                                styles={{
+                                    body: {
+                                        padding: 8
+                                    }
+                                }}
+                                size="small"
+                                className="location-card"
+                                cover={
+                                    // Stays mounted and slides open/closed (see .map-reveal), so toggling doesn't reload the map
+                                    <div className={`map-reveal${showMap ? '' : ' collapsed'}`}>
+                                        <div className="map-reveal-inner">
+                                            <MiniMap apiKey={API_KEY} view={mapView} className="minimap" />
+                                        </div>
+                                    </div>
+                                }
+                            >
+                                <LocationInfo
+                                    data={panoData}
+                                    country={country}
+                                    dates={dates}
+                                    current={current}
+                                    onDateChange={setMonth}
+                                    // Hide the mini map to leave more room for the country list
+                                    countryExtra={<Checkbox checked={showMap} onChange={(e) => toggleMap(e.target.checked)}>Map</Checkbox>}
+                                />
+                            </Card>
+                        )}
                         <Input.Search
                             value={coordsInput}
                             onChange={(e) => setCoordsInput(e.target.value)}
@@ -449,27 +674,15 @@ const Wanderer = () => {
                 </Button>
                 {/* Country selection; on phones it slides in and out (see .sheet-extra) */}
                 <div className={`sheet-extra${showCountries ? ' open' : ''}`}>
-                    <Flex justify="space-between" align="center">
-                        <Typography.Text type="secondary">
-                            {selected.length === 0 ? 'Anywhere on earth'
-                                : selected.length === 1 ? selected[0]
-                                    : `${selected.length} countries selected`}
-                        </Typography.Text>
-                        <Flex gap={6} align="center">
-                            <Typography.Text type="secondary">Multiple</Typography.Text>
-                            <Switch
-                                size="small"
-                                checked={multiple}
-                                onChange={(checked) => {
-                                    setMultiple(checked);
-                                    // Back to single mode: keep only the most recently picked country
-                                    if (!checked) setSelected(selected.slice(-1));
-                                }}
-                            />
-                        </Flex>
-                    </Flex>
+                    <Typography.Text type="secondary">{selectionLabel(selected, areas)}</Typography.Text>
                     <div className="country-list">
-                        <CountryPicker selected={selected} onChange={setSelected} multiple={multiple} />
+                        <CountryPicker
+                            selected={selected}
+                            onChange={handleSelect}
+                            selectedExtra={COUNTRIES[selected]?.levels > 1
+                                ? <SubAreaPicker country={COUNTRIES[selected]} value={subArea} onChange={setSubArea} />
+                                : null}
+                        />
                     </div>
                 </div>
             </Card>

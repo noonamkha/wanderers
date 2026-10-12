@@ -10,6 +10,8 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+# GADM files, downloaded with `npm run gadm` (GADM licence: no redistribution)
+public/gadm
 *.local
 
 # Editor directories and files
