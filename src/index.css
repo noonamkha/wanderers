@@ -108,6 +108,16 @@ body {
         transition: height 0.3s ease;
     }
 
+    /* Stop the browser from treating swipes on the panel as page scrolling (which cancels them),
+       so the sheet's own swipe handling gets them. The country list still scrolls */
+    .panel {
+        touch-action: none;
+    }
+
+    .panel .country-list {
+        touch-action: pan-y;
+    }
+
     /* Swiped up: the sheet takes half the screen */
     .panel.open {
         height: 70dvh;

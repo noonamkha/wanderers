@@ -280,9 +280,8 @@ const Wanderer = () => {
     const showCountries = !isPhone || sheetOpen;
 
     function handleTouchStart(e) {
-        // Let the country list scroll normally; only count it as a swipe when the list is at the top
-        const list = e.target.closest('.country-list');
-        touchStartY.current = list && list.scrollTop > 0 ? null : e.touches[0].clientY;
+        // Swipes inside the country selection are for scrolling, not for the sheet
+        touchStartY.current = e.target.closest('.sheet-extra') ? null : e.touches[0].clientY;
     }
 
     function handleTouchEnd(e) {
@@ -378,6 +377,7 @@ const Wanderer = () => {
                 classNames={{ body: 'panel-body' }}
                 onTouchStart={isPhone ? handleTouchStart : undefined}
                 onTouchEnd={isPhone ? handleTouchEnd : undefined}
+                onTouchCancel={() => { touchStartY.current = null; }}
             >
                 {/* Phone: drag handle, also tappable */}
                 {isPhone && <div className="sheet-handle" onClick={() => setSheetOpen(!sheetOpen)} />}
