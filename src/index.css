@@ -61,6 +61,15 @@ body {
     gap: 8px;
 }
 
+.logo {
+    display: block;
+    height: 32px;
+    width: auto;
+    min-width: 0; /* shrink rather than push the theme switch out on narrow panels */
+    object-fit: contain;
+    object-position: left;
+}
+
 .flag {
     margin-right: 6px;
     vertical-align: -2px;

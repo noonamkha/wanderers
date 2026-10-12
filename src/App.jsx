@@ -3,8 +3,9 @@ import { yellow, grey } from '@ant-design/colors';
 import { Button, Checkbox, Collapse, Flex, Input, Select, Switch, Typography, message, Space, ConfigProvider, theme, Card } from 'antd';
 import { AimOutlined, CompassOutlined, EnvironmentOutlined, ClockCircleOutlined, UserOutlined, MoonFilled, SunFilled } from '@ant-design/icons';
 import { setOptions, importLibrary } from '@googlemaps/js-api-loader';
+import logo from './assets/nu-tetris.svg';
 import { COUNTRIES, CONTINENTS, isInCountry, randomPointIn } from './countries';
-
+import NuTetris from "./assets/nu-tetris.svg?raw"
 // Set in .env.local (not committed): VITE_GOOGLE_MAPS_API_KEY=...
 // It still ends up in the built JS, so restrict the key in Google Cloud Console
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
@@ -98,9 +99,34 @@ function panoDates(data) {
 }
 
 // Place name, country and capture date of the current panorama, with a picker when there are several dates
+// Light / dark mode toggle
+const ThemeSwitch = () => {
+    const { modeTheme, setModeTheme } = useContext(ModeThemeContext);
+    return (
+        <Switch
+            styles={{
+                root: {
+                    backgroundColor: modeTheme == "light" ? yellow.primary : grey.primary
+                }
+            }}
+            checked={modeTheme == "light"}
+            unCheckedChildren={<MoonFilled />}
+            checkedChildren={<SunFilled />}
+            onClick={(checked) => {
+                if (checked) {
+                    localStorage.setItem("modeTheme", "light")
+                    setModeTheme("light")
+                }
+                else {
+                    localStorage.setItem("modeTheme", "dark")
+                    setModeTheme("dark")
+                }
+            }} />
+    );
+}
+
 // compact: a single row with the country on the left and the date on the right (minimized phone sheet)
 const LocationInfo = ({ data, dates, current, onDateChange, compact }) => {
-    const { modeTheme, setModeTheme } = useContext(ModeThemeContext);
     if (!data) return null;
     const country = countryAt(data.location.latLng.toJSON());
 
@@ -133,28 +159,7 @@ const LocationInfo = ({ data, dates, current, onDateChange, compact }) => {
 
     return (
         <Flex vertical gap={2} className="location-info">
-            <Flex align='center' justify='space-between'>
-                {countryName}
-                <Switch
-                    styles={{
-                        root: {
-                            backgroundColor: modeTheme == "light" ? yellow.primary : grey.primary
-                        }
-                    }}
-                    checked={modeTheme == "light"}
-                    unCheckedChildren={<MoonFilled />}
-                    checkedChildren={<SunFilled />}
-                    onClick={(checked, event) => {
-                        if (checked) {
-                            localStorage.setItem("modeTheme", "light")
-                            setModeTheme("light")
-                        }
-                        else {
-                            localStorage.setItem("modeTheme", "dark")
-                            setModeTheme("dark")
-                        }
-                    }} />
-            </Flex>
+            {countryName}
             {/* One line, click "more" to expand. key resets the expanded state for each new location */}
             <Space>
                 <EnvironmentOutlined />
@@ -281,6 +286,7 @@ function useIsPhone() {
 }
 
 const Wanderer = () => {
+    const { modeTheme } = useContext(ModeThemeContext);
     const [ready, setReady] = useState(false);
     const [position, setPosition] = useState(null);
     const [panoData, setPanoData] = useState(null);
@@ -407,6 +413,16 @@ const Wanderer = () => {
             >
                 {/* Phone: drag handle, also tappable */}
                 {isPhone && <div className="sheet-handle" onClick={() => setSheetLevel(sheetLevel === 2 ? 1 : sheetLevel + 1)} />}
+                <Flex align="center" justify="space-between" gap={8}>
+                    {/* The logo is black; invert it to white in dark mode */}
+                    <img
+                        src={logo}
+                        alt="NuTetris"
+                        className="logo"
+                        style={{ filter: modeTheme === 'dark' ? 'invert(1)' : 'none', height: 18 }}
+                    />
+                    <ThemeSwitch />
+                </Flex>
                 {!isPhone && <MiniMap apiKey={API_KEY} position={position} className="minimap" />}
                 {/* Both views stay rendered so switching between minimized and normal can slide (see .sheet-section) */}
                 <div className={`sheet-section${minimized ? '' : ' collapsed'}`}>
