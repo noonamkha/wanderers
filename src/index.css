@@ -78,7 +78,7 @@ body {
     top: 10px;
     right: 10px;
     z-index: 1;
-    width: 50vw; /* half the screen width, height follows (square) */
+    width: 33vw; /* half the screen width, height follows (square) */
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
 }
 
@@ -100,7 +100,7 @@ body {
         right: 0;
         bottom: 0;
         width: auto;
-        max-height: 50dvh;
+        max-height: 70dvh;
         border-radius: 12px 12px 0 0;
         border-bottom: 0;
         /* Lets height animate from auto (Chrome/Edge; other browsers just jump) */
@@ -110,7 +110,7 @@ body {
 
     /* Swiped up: the sheet takes half the screen */
     .panel.open {
-        height: 50dvh;
+        height: 70dvh;
     }
 
     .panel.open .panel-body {
@@ -128,7 +128,7 @@ body {
 
     .panel-body > .sheet-extra.open {
         flex: 1;
-        max-height: 50dvh;
+        max-height: 70dvh;
         margin-top: 0;
         opacity: 1;
     }
