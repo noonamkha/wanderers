@@ -1,4 +1,4 @@
-// Builds src/gadm-index.json: one entry per GADM country with its name, how many levels we use (max 3: 0-2),
+// Builds src/gadm-index.json: one entry per GADM country with its name, how many levels we use (max 4: 0-3),
 // the bounding box of its level-0 border, and continent / ISO2 code (for the flag) from Natural Earth.
 // Run occasionally: node scripts/build-gadm-index.mjs
 import fs from 'node:fs';
@@ -7,7 +7,7 @@ import bbox from '@turf/bbox';
 
 const GADM = 'https://geodata.ucdavis.edu/gadm/gadm4.1/json';
 const NATURAL_EARTH = 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_50m_admin_0_countries.geojson';
-const MAX_LEVELS = 3;
+const MAX_LEVELS = 4;
 
 // Country list from GADM's download page: <option value="VNM_Vietnam_4"> = code, name, number of levels
 const page = await (await fetch('https://gadm.org/download_country.html')).text();

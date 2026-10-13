@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState, createContext, useContext } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, useDeferredValue, createContext, useContext } from 'react';
 import { yellow, grey, green } from '@ant-design/colors';
 import {
     Button,
@@ -40,7 +40,7 @@ import {
 } from '@ant-design/icons';
 import { setOptions, importLibrary } from '@googlemaps/js-api-loader';
 import logo from './assets/nu-tetris.svg';
-import { COUNTRIES, CONTINENTS, prettyName, loadLevel, areaFeature, isInFeature, randomPointIn, countryAt, loadSearchIndex } from './gadm';
+import { COUNTRIES, CONTINENTS, areaFeature, isInFeature, randomPointIn, countryAt, loadSearchIndex } from './gadm';
 import NuTetris from "./assets/nu-tetris.svg?raw"
 // Set in .env.local (not committed): VITE_GOOGLE_MAPS_API_KEY=...
 // It still ends up in the built JS, so restrict the key in Google Cloud Console
@@ -341,9 +341,10 @@ const CONTINENT_EMOJI = {
 const AREA_NAMES = new Map();
 const AREA_SHORT_NAMES = new Map();
 
-// Level 1 (and level 2) areas of a country for the breadcrumb menus, built from one GADM file:
-// the level 2 file also has each area's level 1 parent (GID_1, NAME_1)
-// Built once per country (the tree's cascader and the breadcrumb share it)
+// A country's areas for the location menus (cascader / phone sheet): level 1, with level 2 and level 3 below,
+// as cascader options { value, label, name, children }. Built from the search index (names only, already
+// downloaded when a menu opens), so opening menus never downloads border files: those are only needed for
+// "Random location" inside an area and for the country lookup. Built once per country
 const subAreaOptionsCache = new Map();
 function subAreaOptions(country) {
     if (!subAreaOptionsCache.has(country.code)) {
@@ -356,27 +357,22 @@ function subAreaOptions(country) {
 }
 
 async function buildSubAreaOptions(country) {
-    const level = Math.min(country.levels - 1, 2);
-    const data = await loadLevel(country.code, level);
-    const level1 = new Map();
-    for (const { properties: p } of data.features) {
-        const name1 = prettyName(p.NAME_1);
-        if (!level1.has(p.GID_1)) {
-            level1.set(p.GID_1, { value: p.GID_1, label: name1, children: level === 2 ? [] : undefined });
-            AREA_NAMES.set(p.GID_1, `${name1}, ${country.name}`);
-            AREA_SHORT_NAMES.set(p.GID_1, name1);
-        }
-        if (level === 2) {
-            const name2 = prettyName(p.NAME_2);
-            level1.get(p.GID_1).children.push({ value: p.GID_2, label: name2 });
-            AREA_NAMES.set(p.GID_2, `${name2}, ${name1}, ${country.name}`);
-            AREA_SHORT_NAMES.set(p.GID_2, name2);
-        }
-    }
+    const index = await loadSearchIndex();
     const byLabel = (a, b) => a.label.localeCompare(b.label);
-    const options = [...level1.values()].sort(byLabel);
-    options.forEach((o) => o.children?.sort(byLabel));
-    return options;
+    const option = (value, name, children) => ({ value, label: name, name, children: children?.length ? children.sort(byLabel) : undefined });
+    return (index[country.code] ?? []).map(([gid1, name1, districts = []]) => {
+        AREA_NAMES.set(gid1, `${name1}, ${country.name}`);
+        AREA_SHORT_NAMES.set(gid1, name1);
+        return option(gid1, name1, districts.map(([gid2, name2, wards = []]) => {
+            AREA_NAMES.set(gid2, `${name2}, ${name1}, ${country.name}`);
+            AREA_SHORT_NAMES.set(gid2, name2);
+            return option(gid2, name2, wards.map(([gid3, name3]) => {
+                AREA_NAMES.set(gid3, `${name3}, ${name2}, ${name1}`);
+                AREA_SHORT_NAMES.set(gid3, name3);
+                return option(gid3, name3);
+            }));
+        }));
+    }).sort(byLabel);
 }
 
 const countryArea = (country) => ({ code: country.code, level: 0, gid: country.code, name: country.name });
@@ -400,46 +396,78 @@ const sameArray = (a, b) => a.length === b.length && a.every((x, i) => x === b[i
 // For search: lowercase without accents, so "chau doc" finds "Châu Đốc"
 const fold = (text) => text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase();
 
-// Every searchable location, built once from the search index: { path, names, level, flag, folded }
-// path = [continent, country, level 1, level 2] (as long as needed); names = what to show for it.
+// Every searchable location (continents, countries, levels 1-3: ~195,000), built once from the search index.
+// Each entry: { value, label, level, flag, parent, folded }. Kept small (a link to the parent instead of a
+// copied path) and sorted once by level, then name, so a search is a single pass with no sorting.
 // Also fills the area name maps, so a picked result shows its name before its country's file has loaded
 let searchEntries = null;
 async function loadSearchEntries() {
     if (searchEntries) return searchEntries;
     const index = await loadSearchIndex();
     const entries = [];
+    const add = (entry) => {
+        entry.folded = fold(entry.name ?? entry.label);
+        entries.push(entry);
+        return entry;
+    };
     for (const [continent, countries] of CONTINENTS) {
-        const continentKey = `continent:${continent}`;
-        entries.push({ path: [continentKey], names: [`${CONTINENT_EMOJI[continent] ?? '🌐'} ${continent}`], level: 0, name: continent });
+        const continentEntry = add({ value: `continent:${continent}`, label: `${CONTINENT_EMOJI[continent] ?? '🌐'} ${continent}`, name: continent, level: 0, parent: null });
         for (const c of countries) {
-            entries.push({ path: [continentKey, c.code], names: [c.name], level: 1, flag: c.flag });
-            for (const [gid1, name1, children] of index[c.code] ?? []) {
+            const countryEntry = add({ value: c.code, label: c.name, level: 1, flag: c.flag, parent: continentEntry });
+            for (const [gid1, name1, districts = []] of index[c.code] ?? []) {
                 AREA_NAMES.set(gid1, `${name1}, ${c.name}`);
                 AREA_SHORT_NAMES.set(gid1, name1);
-                entries.push({ path: [continentKey, c.code, gid1], names: [c.name, name1], level: 2, flag: c.flag });
-                for (const [gid2, name2] of children) {
+                const e1 = add({ value: gid1, label: name1, level: 2, flag: c.flag, parent: countryEntry });
+                for (const [gid2, name2, wards = []] of districts) {
                     AREA_NAMES.set(gid2, `${name2}, ${name1}, ${c.name}`);
                     AREA_SHORT_NAMES.set(gid2, name2);
-                    entries.push({ path: [continentKey, c.code, gid1, gid2], names: [c.name, name1, name2], level: 3, flag: c.flag });
+                    const e2 = add({ value: gid2, label: name2, level: 3, flag: c.flag, parent: e1 });
+                    for (const [gid3, name3] of wards) {
+                        AREA_NAMES.set(gid3, `${name3}, ${name2}, ${name1}`);
+                        AREA_SHORT_NAMES.set(gid3, name3);
+                        add({ value: gid3, label: name3, level: 4, flag: c.flag, parent: e2 });
+                    }
                 }
             }
         }
     }
-    for (const e of entries) e.folded = fold(e.name ?? e.names.at(-1));
+    entries.sort((a, b) => a.level - b.level || (a.folded < b.folded ? -1 : a.folded > b.folded ? 1 : 0));
     searchEntries = entries;
     return entries;
 }
 
 const SEARCH_LIMIT = 100;
 
+// A search entry's full path ([continent, country, level 1, …]) and the names to show (from the country down;
+// a continent shows its own emoji + name)
+function entryPath(entry) {
+    const path = [];
+    for (let e = entry; e; e = e.parent) path.unshift(e.value);
+    return path;
+}
+function entryNames(entry) {
+    if (entry.level === 0) return [entry.label];
+    const names = [];
+    for (let e = entry; e && e.level >= 1; e = e.parent) names.unshift(e.label);
+    return names;
+}
+
 // Locations whose own name matches: exact matches first, then names starting with the text, then the rest;
-// bigger areas before smaller ones. Returns { results (first SEARCH_LIMIT), total }
+// within each, bigger areas before smaller ones, then by name (the entries are pre-sorted that way, so this is
+// one pass). Returns { results (first SEARCH_LIMIT, as { path, names, flag }), total }
 function searchLocations(entries, query) {
     const q = fold(query.trim());
-    const rank = (e) => (e.folded === q ? 0 : e.folded.startsWith(q) ? 1 : 2);
-    const matches = entries.filter((e) => e.folded.includes(q));
-    matches.sort((a, b) => rank(a) - rank(b) || a.level - b.level || a.folded.localeCompare(b.folded));
-    return { results: matches.slice(0, SEARCH_LIMIT), total: matches.length };
+    const buckets = [[], [], []];
+    let total = 0;
+    for (const e of entries) {
+        if (!e.folded.includes(q)) continue;
+        total++;
+        const bucket = buckets[e.folded === q ? 0 : e.folded.startsWith(q) ? 1 : 2];
+        if (bucket.length < SEARCH_LIMIT) bucket.push(e);
+    }
+    const results = buckets.flat().slice(0, SEARCH_LIMIT)
+        .map((e) => ({ path: entryPath(e), names: entryNames(e), flag: e.flag }));
+    return { results, total };
 }
 
 // Search over all locations (search index), shared by the desktop menu and the phone sheet.
@@ -461,9 +489,15 @@ function useLocationSearch(onPickResult) {
         onPickResult(path, viaEnter);
     };
 
-    // At least 2 letters: a single letter matches nearly all ~50,000 names (slow and not useful)
+    // At least 2 letters: a single letter matches nearly all ~195,000 names (slow and not useful)
     const tooShort = query.trim() && fold(query.trim()).length < 2;
-    const search = query.trim() && entries && !tooShort ? searchLocations(entries, query) : null;
+    // A search over all names takes ~60-190 ms: the box updates right away and the results follow (deferred),
+    // and they're kept for the same text, so moving the highlight with ↑ / ↓ doesn't search again
+    const deferredQuery = useDeferredValue(query);
+    const search = useMemo(() => {
+        const q = deferredQuery.trim();
+        return q && entries && fold(q).length >= 2 ? searchLocations(entries, q) : null;
+    }, [entries, deferredQuery]);
 
     // ↑ / ↓ move the highlight through the results (keeping it in view), Enter picks the highlighted one
     function handleKey(e) {
@@ -497,6 +531,8 @@ function useLocationSearch(onPickResult) {
         <Typography.Text type="secondary">Loading locations…</Typography.Text>
     ) : tooShort ? (
         <Typography.Text type="secondary">Type at least 2 letters</Typography.Text>
+    ) : !search ? (
+        <Typography.Text type="secondary">Searching…</Typography.Text> // the deferred results haven't caught up yet
     ) : (
         <div className="area-search-results" ref={resultsRef}>
             {search.results.map((r, i) => (
@@ -753,13 +789,14 @@ const LocationSheet = ({ sheet, setSheet, options, current, onPick, onLoad, onMi
 // searchSignal: changes when the S key is pressed; the deepest location's menu opens with search focused
 const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setSheet, onMinimize, searchSignal }) => {
     const country = COUNTRIES[selected];
-    const [loaded, setLoaded] = useState({}); // country code -> its level 1 / 2 options
+    const [loaded, setLoaded] = useState({}); // country code -> its areas (levels 1-3) as options
 
-    const load = (code) => {
-        const c = COUNTRIES[code];
-        if (!c || c.levels < 2 || loaded[code]) return;
+    // Load what's below a country being opened (its levels 1-3, all at once, from the search index)
+    const load = (value) => {
+        const c = COUNTRIES[value];
+        if (!c || c.levels < 2 || loaded[value]) return;
         subAreaOptions(c)
-            .then((o) => setLoaded((all) => ({ ...all, [code]: o })))
+            .then((o) => setLoaded((all) => ({ ...all, [value]: o })))
             .catch(console.error);
     };
 
@@ -771,15 +808,16 @@ const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setShe
             .catch(console.error);
     }, [country]);
 
+
     const flag = (c) => c.flag && <img src={c.flag} width={20} height={15} alt="" className="flag" />;
     const continentTitle = (name) => `${CONTINENT_EMOJI[name] ?? '🌐'} ${name}`;
-    const withNames = (list) => list?.map((o) => ({ ...o, name: o.label, children: withNames(o.children) }));
+    const areaOptions = (code) => loaded[code];
     const countryOption = (c) => ({
         value: c.code,
         name: c.name,
         label: <>{flag(c)}{c.name}</>,
         isLeaf: c.levels === 1,
-        children: withNames(loaded[c.code]),
+        children: areaOptions(c.code),
     });
     const continentOptions = CONTINENTS.map(([name, countries]) => ({
         value: `continent:${name}`,
@@ -788,12 +826,12 @@ const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setShe
         children: countries.map(countryOption),
     }));
 
-    // Current selection as a full path: [continent, country, level 1, level 2]
+    // Current selection as a full path: [continent, country, level 1, level 2, level 3]
     const continentKey = country ? `continent:${country.continent}` : selected;
     const fullPath = !selected ? [] : country ? [continentKey, country.code, ...subArea] : [selected];
     // A location: desktop cascader menu, or (phone) a link opening the sheet at that level
     // Level of the last breadcrumb location (prefix length of its menu), which the S key opens
-    const lastLevel = !country ? 0 : !subArea[0] ? 1 : !subArea[1] ? 2 : 3;
+    const lastLevel = !country ? 0 : !subArea[0] ? 1 : !subArea[1] ? 2 : !subArea[2] ? 3 : 4;
     const menu = (title, options, prefix) => isPhone
         ? <a onClick={() => setSheet({ open: true, stack: prefix, direction: 'none' })}>{title}</a>
         : (
@@ -819,14 +857,21 @@ const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setShe
         if (country) {
             const siblings = continentOptions.find((o) => o.value === continentKey).children;
             items.push({ title: menu(<>{flag(country)}{country.name}</>, siblings, [continentKey]) });
-            const provinces = withNames(loaded[country.code]);
+            const provinces = areaOptions(country.code);
             if (subArea[0]) {
                 const province = provinces?.find((o) => o.value === subArea[0]);
                 const name = province?.label ?? AREA_SHORT_NAMES.get(subArea[0]) ?? '…'; // until the file has loaded
                 items.push({ title: provinces ? menu(name, provinces, [continentKey, country.code]) : name });
                 if (subArea[1]) {
-                    const districtName = province?.children?.find((d) => d.value === subArea[1])?.label ?? AREA_SHORT_NAMES.get(subArea[1]) ?? '…';
+                    const district = province?.children?.find((d) => d.value === subArea[1]);
+                    const districtName = district?.label ?? AREA_SHORT_NAMES.get(subArea[1]) ?? '…';
                     items.push({ title: province ? menu(districtName, province.children, [continentKey, country.code, subArea[0]]) : districtName });
+                    if (subArea[2]) {
+                        const wardName = district?.children?.find((w) => w.value === subArea[2])?.label ?? AREA_SHORT_NAMES.get(subArea[2]) ?? '…';
+                        items.push({ title: district?.children
+                            ? menu(wardName, district.children, [continentKey, country.code, subArea[0], subArea[1]])
+                            : wardName });
+                    }
                 }
             }
         }
@@ -859,7 +904,7 @@ function loadSelection() {
         const isContinent = CONTINENTS.some(([continent]) => `continent:${continent}` === selected);
         if (isContinent) return { selected, subArea: [] };
         if (!COUNTRIES[selected]) throw new Error('unknown selection');
-        const validPath = Array.isArray(subArea) && subArea.length <= 2 && subArea.every((gid) => typeof gid === 'string' && gid.startsWith(`${selected}.`));
+        const validPath = Array.isArray(subArea) && subArea.length <= 3 && subArea.every((gid) => typeof gid === 'string' && gid.startsWith(`${selected}.`));
         return { selected, subArea: validPath ? subArea : [] };
     } catch {
         return { selected: null, subArea: [] };
@@ -1112,7 +1157,7 @@ const Wanderer = () => {
         saveSetting('showMap', String(show));
     }
 
-    // Current selection as a full path: [continent, country, level 1, level 2] ([] = anywhere)
+    // Current selection as a full path: [continent, country, level 1, level 2, level 3] ([] = anywhere)
     function selectionPath() {
         if (!selected) return [];
         return COUNTRIES[selected] ? [`continent:${COUNTRIES[selected].continent}`, selected, ...subArea] : [selected];

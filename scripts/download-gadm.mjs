@@ -1,4 +1,4 @@
-// Downloads the original GADM 4.1 GeoJSON files (zipped, unchanged) for levels 0-2 of every country
+// Downloads the original GADM 4.1 GeoJSON files (zipped, unchanged) for levels 0-3 of every country
 // into public/gadm/, which the app loads on demand. Skips files that are already there.
 // Run: npm run gadm
 import fs from 'node:fs';
