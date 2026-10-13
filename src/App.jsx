@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, createContext, useContext } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, createContext, useContext } from 'react';
 import { yellow, grey, green } from '@ant-design/colors';
 import {
     Button,
@@ -16,9 +16,14 @@ import {
     Breadcrumb,
     Cascader,
     Popover,
+    Drawer,
 } from 'antd';
 import {
+    LoadingOutlined,
     CloseOutlined,
+    LeftOutlined,
+    RightOutlined,
+    CheckOutlined,
     AimOutlined,
     CompassOutlined,
     EnvironmentOutlined,
@@ -180,6 +185,16 @@ async function checkPano(pano) {
 
 // Place name, country and capture date of the current panorama, with a picker when there are several dates
 // Light / dark mode toggle
+// While the theme switches, fade every color on the page (.theme-fade in index.css) instead of only the
+// components that happen to have their own transition. Only for a moment, so hovers stay snappy afterwards
+let themeFadeTimer;
+function fadeThemeChange() {
+    const root = document.documentElement;
+    root.classList.add('theme-fade');
+    clearTimeout(themeFadeTimer);
+    themeFadeTimer = setTimeout(() => root.classList.remove('theme-fade'), 500);
+}
+
 const ThemeSwitch = () => {
     const { modeTheme, setModeTheme } = useContext(ModeThemeContext);
     return (
@@ -187,9 +202,11 @@ const ThemeSwitch = () => {
             <Button
                 shape='circle'
                 type="text"
-                // size="large"
+                size="large"
+                className="theme-button"
                 icon={modeTheme == "light" ? <SunOutlined /> : <MoonFilled />}
                 onClick={(e) => {
+                    fadeThemeChange();
                     if (modeTheme == "dark") {
                         localStorage.setItem("modeTheme", "light")
                         setModeTheme("light")
@@ -204,16 +221,22 @@ const ThemeSwitch = () => {
     );
 }
 
+// The country's flag, or a spinner while a new location / its country is being looked up
+const CountryFlag = ({ country, busy }) => busy
+    ? <LoadingOutlined spin className="flag flag-loading" />
+    : country?.flag ? <img src={country.flag} width={20} height={15} alt="" className="flag" /> : null;
+
+// busy: a new location / its country is being looked up (the flag shows a spinner)
 // compact: a single row with the country on the left and the date on the right (minimized phone sheet)
 // country: from countryAt(), undefined while it's still being looked up
 // countryExtra: shown at the right end of the country row
-const LocationInfo = ({ data, country, dates, current, onDateChange, compact, countryExtra }) => {
+const LocationInfo = ({ data, country, busy, dates, current, onDateChange, compact, countryExtra }) => {
     if (!data) return null;
 
     const countryName = (
         // One line with "…" when too long (full name in a tooltip); flex lets it shrink next to the date / Map checkbox
         <Typography.Text strong ellipsis={{ tooltip: country?.name }} style={{ flex: 1, minWidth: 0 }}>
-            {country && <img src={country.flag} width={20} height={15} alt="" className="flag" />}
+            <CountryFlag country={country} busy={busy} />
             {country === undefined ? '…' : country?.name || 'Unknown country'}
         </Typography.Text>
     );
@@ -277,7 +300,8 @@ const LocationInfo = ({ data, country, dates, current, onDateChange, compact, co
 // Maps Embed API, Street View mode: free and unlimited, but can't be controlled from code
 const EmbedStreetView = ({ apiKey, pano }) => {
     if (!pano) return null;
-    const params = new URLSearchParams({ key: apiKey, pano });
+    // fov: horizontal field of view, 10-100°; the widest (100) instead of the default 90
+    const params = new URLSearchParams({ key: apiKey, pano, fov: 100 });
     return (
         <iframe
             src={`https://www.google.com/maps/embed/v1/streetview?${params}`}
@@ -299,6 +323,8 @@ const MiniMap = ({ apiKey, position, className, style }) => {
     const params = new URLSearchParams({ key: apiKey, q: `${position.lat},${position.lng}`, zoom: 8 });
     return <iframe src={`https://www.google.com/maps/embed/v1/place?${params}`} className={className} style={style} />;
 }
+
+const ANYWHERE = '🌍 Anywhere';
 
 const CONTINENT_EMOJI = {
     Asia: '🌏',
@@ -369,6 +395,8 @@ function selectedAreas(selected, subArea) {
     return [{ code: country.code, level: subArea.length, gid, name: AREA_NAMES.get(gid) }];
 }
 
+const sameArray = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+
 // For search: lowercase without accents, so "chau doc" finds "Châu Đốc"
 const fold = (text) => text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase();
 
@@ -414,24 +442,117 @@ function searchLocations(entries, query) {
     return { results: matches.slice(0, SEARCH_LIMIT), total: matches.length };
 }
 
-// One breadcrumb location: click it to open a cascader (clicking an option picks it and opens the next level;
-// it stays open so you can keep adjusting) with a search box that gets focus right away.
-// options: the choices at this location's level; prefix: path above them
-const AreaMenu = ({ title, options, prefix, value, onPick, onLoad }) => {
-    const [open, setOpen] = useState(false);
+// Search over all locations (search index), shared by the desktop menu and the phone sheet.
+// onPickResult(fullPath, viaEnter) is called with the chosen result (viaEnter: picked with the Enter key). Returns the search box, the results view
+// (null while there's no query) and helpers
+function useLocationSearch(onPickResult) {
     const [query, setQuery] = useState('');
     const [entries, setEntries] = useState(searchEntries); // all searchable locations, once loaded
-    const [active, setActive] = useState(0); // highlighted search result (arrow keys / Enter)
-    const searchRef = useRef(null);
+    const [active, setActive] = useState(0); // highlighted result (arrow keys / Enter)
+    const inputRef = useRef(null);
     const resultsRef = useRef(null);
+
+    // The names index (~400 KB) is loaded the first time a menu opens
+    const loadEntries = () => {
+        if (!entries) loadSearchEntries().then(setEntries).catch(console.error);
+    };
+    const pickResult = (path, viaEnter = false) => {
+        setQuery('');
+        onPickResult(path, viaEnter);
+    };
+
+    // At least 2 letters: a single letter matches nearly all ~50,000 names (slow and not useful)
+    const tooShort = query.trim() && fold(query.trim()).length < 2;
+    const search = query.trim() && entries && !tooShort ? searchLocations(entries, query) : null;
+
+    // ↑ / ↓ move the highlight through the results (keeping it in view), Enter picks the highlighted one
+    function handleKey(e) {
+        const count = search?.results.length ?? 0;
+        if (!count) return;
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            const next = e.key === 'ArrowDown' ? Math.min(active + 1, count - 1) : Math.max(active - 1, 0);
+            setActive(next);
+            resultsRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            pickResult(search.results[Math.min(active, count - 1)].path, true);
+        }
+    }
+
+    const searchBox = (
+        <Input
+            ref={inputRef}
+            placeholder="Search"
+            allowClear
+            value={query}
+            onChange={(e) => {
+                setQuery(e.target.value);
+                setActive(0);
+            }}
+            onKeyDown={handleKey}
+        />
+    );
+    const searchView = !query.trim() ? null : !entries ? (
+        <Typography.Text type="secondary">Loading locations…</Typography.Text>
+    ) : tooShort ? (
+        <Typography.Text type="secondary">Type at least 2 letters</Typography.Text>
+    ) : (
+        <div className="area-search-results" ref={resultsRef}>
+            {search.results.map((r, i) => (
+                <div
+                    key={r.path.join('/')}
+                    className={`area-search-result${i === active ? ' active' : ''}`}
+                    onClick={() => pickResult(r.path)}
+                    onMouseEnter={() => setActive(i)}
+                >
+                    {r.flag && <img src={r.flag} width={20} height={15} alt="" className="flag" />}
+                    {r.names.join(' › ')}
+                </div>
+            ))}
+            {!search.total && <Typography.Text type="secondary">No matches</Typography.Text>}
+            {search.total > SEARCH_LIMIT && (
+                <Typography.Text type="secondary" className="area-search-more">
+                    {search.total - SEARCH_LIMIT} more, type more to narrow down
+                </Typography.Text>
+            )}
+        </div>
+    );
+
+    return { searchBox, searchView, setQuery, loadEntries, focus: () => inputRef.current?.focus() };
+}
+
+// Desktop: one breadcrumb location. Click it to open a cascader (clicking an option picks it and opens the
+// next level; it stays open so you can keep adjusting) with a search box that gets focus right away.
+// options: the choices at this location's level; prefix: path above them
+// openSignal: a number that changes when the S key is pressed; the menu with isSearchTarget (the last
+// breadcrumb location) then opens with the search focused
+const AreaMenu = ({ title, options, prefix, value, onPick, onLoad, openSignal, isSearchTarget }) => {
+    const [open, setOpen] = useState(false);
+    // A search result picked with Enter is a final choice: close the menu (clicks keep it open for adjusting)
+    const { searchBox, searchView, setQuery, loadEntries, focus } = useLocationSearch((path, viaEnter) => {
+        onPick(path);
+        if (viaEnter) setOpen(false);
+    });
+
+    // S key: open (adjusting state during render when the signal changes), then focus the search box
+    const [seenSignal, setSeenSignal] = useState(openSignal);
+    if (openSignal !== seenSignal) {
+        setSeenSignal(openSignal);
+        if (isSearchTarget) setOpen(true);
+    }
+    useEffect(() => {
+        if (!openSignal || !isSearchTarget) return;
+        loadEntries();
+        const timer = setTimeout(focus, 50);
+        return () => clearTimeout(timer);
+    }, [openSignal]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleOpenChange = (next) => {
         setOpen(next);
         if (!next) return;
-        // Focus the search box once the popover is shown, so typing works immediately
-        setTimeout(() => searchRef.current?.focus(), 50);
-        // Search covers all locations: load the names index (once, ~400 KB)
-        if (!entries) loadSearchEntries().then(setEntries).catch(console.error);
+        setTimeout(focus, 50); // once the popover is shown, so typing works immediately
+        loadEntries();
     };
 
     // Clicks inside the Street View / map iframes never reach this page, so "click outside" can't see them;
@@ -443,74 +564,22 @@ const AreaMenu = ({ title, options, prefix, value, onPick, onLoad }) => {
         return () => window.removeEventListener('blur', close);
     }, [open]);
 
-    // path: relative to this menu's level (cascader) or, with full = true, a complete path (search results)
-    const pick = (path, full = false) => {
-        setQuery(''); // back to the cascader, showing the new selection
-        onPick(full ? path : [...prefix, ...path]);
+    const pick = (path) => {
+        setQuery('');
+        onPick([...prefix, ...path]);
     };
-    // At least 2 letters: a single letter matches nearly all ~50,000 names (slow and not useful)
-    const tooShort = query.trim() && fold(query.trim()).length < 2;
-    const search = query.trim() && entries && !tooShort ? searchLocations(entries, query) : null;
-
-    // ↑ / ↓ move the highlight through the results (keeping it in view), Enter picks the highlighted one
-    function handleSearchKey(e) {
-        const count = search?.results.length ?? 0;
-        if (!count) return;
-        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-            e.preventDefault();
-            const next = e.key === 'ArrowDown' ? Math.min(active + 1, count - 1) : Math.max(active - 1, 0);
-            setActive(next);
-            resultsRef.current?.children[next]?.scrollIntoView({ block: 'nearest' });
-        } else if (e.key === 'Enter') {
-            e.preventDefault();
-            pick(search.results[Math.min(active, count - 1)].path, true);
-        }
-    }
 
     const content = (
         <Flex vertical gap={8} className="area-menu">
-            <Input
-                ref={searchRef}
-                placeholder="Search"
-                allowClear
-                value={query}
-                onChange={(e) => {
-                    setQuery(e.target.value);
-                    setActive(0);
-                }}
-                onKeyDown={handleSearchKey}
-            />
-            {query.trim() && !entries ? (
-                <Typography.Text type="secondary">Loading locations…</Typography.Text>
-            ) : tooShort ? (
-                <Typography.Text type="secondary">Type at least 2 letters</Typography.Text>
-            ) : search ? (
-                <div className="area-search-results" ref={resultsRef}>
-                    {search.results.map((r, i) => (
-                        <div
-                            key={r.path.join('/')}
-                            className={`area-search-result${i === active ? ' active' : ''}`}
-                            onClick={() => pick(r.path, true)}
-                            onMouseEnter={() => setActive(i)}
-                        >
-                            {r.flag && <img src={r.flag} width={20} height={15} alt="" className="flag" />}
-                            {r.names.join(' › ')}
-                        </div>
-                    ))}
-                    {!search.total && <Typography.Text type="secondary">No matches</Typography.Text>}
-                    {search.total > SEARCH_LIMIT && (
-                        <Typography.Text type="secondary" className="area-search-more">
-                            {search.total - SEARCH_LIMIT} more, type more to narrow down
-                        </Typography.Text>
-                    )}
-                </div>
-            ) : (
+            {searchBox}
+            {searchView ?? (
                 <Cascader.Panel
                     options={options}
                     value={value}
                     expandTrigger="click" // clicking an option picks it and opens its children
                     changeOnSelect // any level can be picked
-                    onChange={(path) => path?.length && pick(path)}
+                    // Clicking the selected option again deselects it (goes up one level)
+                    onChange={(path) => path?.length && pick(sameArray(path, value) ? path.slice(0, -1) : path)}
                     loadData={(selectedOptions) => onLoad(selectedOptions.at(-1).value)}
                 />
             )}
@@ -524,11 +593,165 @@ const AreaMenu = ({ title, options, prefix, value, onPick, onLoad }) => {
     );
 }
 
+// Phone: full-width bottom sheet with the whole hierarchy, one list at a time (continents › countries ›
+// provinces › districts). sheet = { open, stack, direction }: stack is the path of the list shown ([] =
+// continents); it can open at any level and still go back up to the continents.
+// Tap a row to pick it and go into its level, tap the picked row again to deselect it, "All of …" picks the
+// level shown. ‹ or swipe right = back up, swipe left = back down into the selection, swipe down = close
+// (a hard swipe down also minimizes the panel)
+// onMinimize: a hard swipe down closes the sheet and also minimizes the panel (skips a level)
+const LocationSheet = ({ sheet, setSheet, options, current, onPick, onLoad, onMinimize }) => {
+    const touch = useRef(null); // where the current swipe started
+    const close = () => setSheet((s) => ({ ...s, open: false }));
+    const { searchBox, searchView, setQuery, loadEntries, focus } = useLocationSearch((path) => {
+        onPick(path);
+        close(); // a search pick is a final choice
+    });
+
+    // Every time it opens: clear the search (during render, when `open` flips) and load the names index
+    const [wasOpen, setWasOpen] = useState(false);
+    if (sheet.open !== wasOpen) {
+        setWasOpen(sheet.open);
+        if (sheet.open) setQuery('');
+    }
+    useEffect(() => {
+        if (!sheet.open) return;
+        loadEntries();
+        // Opened with the S key: focus the search box once the sheet has slid up
+        if (sheet.focusSearch) {
+            const timer = setTimeout(focus, 300);
+            return () => clearTimeout(timer);
+        }
+    }, [sheet.open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const { stack } = sheet;
+    const nodes = []; // options along the stack
+    let list = options;
+    for (const v of stack) {
+        const node = list?.find((o) => o.value === v);
+        nodes.push(node);
+        list = node?.children;
+    }
+    const here = nodes.at(-1);
+    // A country in the stack whose areas aren't loaded yet (e.g. opened straight at its provinces)
+    useEffect(() => {
+        if (sheet.open && here && !here.children && here.isLeaf === false) onLoad(here.value);
+    });
+
+    const allRow = here ? { label: `All of ${here.name}`, path: stack } : { label: ANYWHERE, path: [] };
+    const hasChildren = (o) => o.children?.length > 0 || o.isLeaf === false;
+    const onSelectedPath = (o) => current[stack.length] === o.value && sameArray(current.slice(0, stack.length), stack);
+
+    const goInto = (value) => setSheet((s) => ({ ...s, stack: [...s.stack, value], direction: 'forward' }));
+    const goBack = () => setSheet((s) => (s.stack.length ? { ...s, stack: s.stack.slice(0, -1), direction: 'back' } : s));
+    // Into the level of this list's option that's on the current selection (e.g. "Vietnam" list, Hồ Chí Minh
+    // selected: its districts). Nothing to do if the selection doesn't go deeper than this list
+    const goForward = () => {
+        const next = sameArray(current.slice(0, stack.length), stack) ? current[stack.length] : undefined;
+        const option = list?.find((o) => o.value === next);
+        if (!option || !hasChildren(option)) return;
+        goInto(option.value);
+        if (!option.children) onLoad(option.value); // a country whose areas aren't loaded yet
+    };
+
+    const tapRow = (o) => {
+        const path = [...stack, o.value];
+        if (sameArray(path, current)) {
+            onPick(path.slice(0, -1)); // tapped the picked row again: deselect
+            return;
+        }
+        onPick(path);
+        if (hasChildren(o)) {
+            goInto(o.value);
+            if (!o.children) onLoad(o.value); // a country whose areas aren't loaded yet
+        }
+    };
+
+    // Swipes: right = back up a level, left = into the selected option's level, down = close.
+    // Inside the list, down only counts when the list was
+    // scrolled to the top (otherwise it's scrolling). Same 40 px threshold as the panel's swipe
+    const swipe = {
+        onTouchStart: (e) => {
+            const listEl = e.target.closest('.area-drill-list');
+            touch.current = {
+                x: e.touches[0].clientX,
+                y: e.touches[0].clientY,
+                time: e.timeStamp,
+                canClose: !listEl || listEl.scrollTop <= 0,
+            };
+        },
+        onTouchEnd: (e) => {
+            const start = touch.current;
+            touch.current = null;
+            if (!start) return;
+            const dx = e.changedTouches[0].clientX - start.x;
+            const dy = e.changedTouches[0].clientY - start.y;
+            if (dx > 40 && Math.abs(dx) > Math.abs(dy) * 1.5) goBack();
+            else if (dx < -40 && Math.abs(dx) > Math.abs(dy) * 1.5) goForward();
+            else if (dy > 40 && dy > Math.abs(dx) * 1.5 && start.canClose) {
+                close();
+                // Hard swipe (fast flick or long drag, like the panel's): also minimize the panel
+                const speed = dy / Math.max(e.timeStamp - start.time, 1); // px per ms
+                if (speed > 1.2 || dy > 200) onMinimize?.();
+            }
+        },
+        onTouchCancel: () => { touch.current = null; },
+    };
+
+    const header = (
+        <Flex align="center" gap={4} {...swipe}>
+            {stack.length > 0 && <Button type="text" icon={<LeftOutlined />} onClick={goBack} />}
+            {/* The option's label: continent emoji / country flag + name (provinces and districts: just the name) */}
+            <span className="area-drill-title">{here ? here.label : 'Continents'}</span>
+        </Flex>
+    );
+
+    return (
+        <Drawer
+            open={sheet.open}
+            onClose={close}
+            placement="bottom"
+            size="75dvh"
+            closable={{ placement: 'end' }} // ✕ on the right, away from the ‹ back button
+            title={header}
+            styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column' } }}
+        >
+            <div className="area-drill-body" {...swipe}>
+                <div className="area-drill-search">{searchBox}</div>
+                {searchView ? <div className="area-drill-list">{searchView}</div> : (
+                    // Keyed by level, so each level change mounts a new list and its slide-in animation plays
+                    <div key={stack.join('/')} className={`area-drill-list slide-${sheet.direction}`}>
+                        <div className="area-drill-row" onClick={() => onPick(allRow.path)}>
+                            <span className="area-drill-check">{sameArray(allRow.path, current) && <CheckOutlined />}</span>
+                            <b>{allRow.label}</b>
+                        </div>
+                        {!list && <div className="area-drill-row"><Typography.Text type="secondary">Loading…</Typography.Text></div>}
+                        {list?.map((o) => (
+                            <div
+                                key={o.value}
+                                className={`area-drill-row${onSelectedPath(o) ? ' selected' : ''}`}
+                                onClick={() => tapRow(o)}
+                            >
+                                <span className="area-drill-check">{sameArray([...stack, o.value], current) && <CheckOutlined />}</span>
+                                <span className="area-drill-label">{o.label}</span>
+                                {hasChildren(o) && <RightOutlined className="area-drill-chevron" />}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </Drawer>
+    );
+}
+
 // The only area picker: the selection as a path, e.g. Asia › Vietnam › An Giang › Châu Đốc ("Anywhere" when
 // nothing is picked). Clicking a location opens a cascader of the choices at that level; clicking a choice
 // opens the level below (Anywhere: continents › countries › provinces › districts; Vietnam: Asian countries › …).
 // × clears the selection
-const SelectionBreadcrumb = ({ selected, subArea, onPick }) => {
+// Phone: each location opens the shared LocationSheet at its level instead (sheet / setSheet from Wanderer,
+// so a swipe up on the panel can open it too)
+// searchSignal: changes when the S key is pressed; the deepest location's menu opens with search focused
+const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setSheet, onMinimize, searchSignal }) => {
     const country = COUNTRIES[selected];
     const [loaded, setLoaded] = useState({}); // country code -> its level 1 / 2 options
 
@@ -568,16 +791,31 @@ const SelectionBreadcrumb = ({ selected, subArea, onPick }) => {
     // Current selection as a full path: [continent, country, level 1, level 2]
     const continentKey = country ? `continent:${country.continent}` : selected;
     const fullPath = !selected ? [] : country ? [continentKey, country.code, ...subArea] : [selected];
-    const menu = (title, options, prefix) => (
-        <AreaMenu title={title} options={options} prefix={prefix} value={fullPath.slice(prefix.length)} onPick={onPick} onLoad={load} />
-    );
+    // A location: desktop cascader menu, or (phone) a link opening the sheet at that level
+    // Level of the last breadcrumb location (prefix length of its menu), which the S key opens
+    const lastLevel = !country ? 0 : !subArea[0] ? 1 : !subArea[1] ? 2 : 3;
+    const menu = (title, options, prefix) => isPhone
+        ? <a onClick={() => setSheet({ open: true, stack: prefix, direction: 'none' })}>{title}</a>
+        : (
+            <AreaMenu
+                title={title}
+                options={options}
+                prefix={prefix}
+                value={fullPath.slice(prefix.length)}
+                onPick={onPick}
+                onLoad={load}
+                openSignal={searchSignal}
+                isSearchTarget={prefix.length === lastLevel}
+            />
+        );
+    const continentsMenu = (title) => menu(title, continentOptions, []);
 
     const items = [];
     if (!selected) {
-        items.push({ title: menu('Anywhere', continentOptions, []) });
+        items.push({ title: continentsMenu(ANYWHERE) });
     } else {
         const continentName = continentKey.slice('continent:'.length);
-        items.push({ title: menu(continentTitle(continentName), continentOptions, []) });
+        items.push({ title: continentsMenu(continentTitle(continentName)) });
         if (country) {
             const siblings = continentOptions.find((o) => o.value === continentKey).children;
             items.push({ title: menu(<>{flag(country)}{country.name}</>, siblings, [continentKey]) });
@@ -598,6 +836,17 @@ const SelectionBreadcrumb = ({ selected, subArea, onPick }) => {
         <Flex align="center" gap={4} className="selection-breadcrumb">
             <Breadcrumb items={items} style={{ flex: 1, minWidth: 0 }} />
             {selected && <Button type="text" size="small" icon={<CloseOutlined />} onClick={() => onPick([])} title="Clear (anywhere)" />}
+            {isPhone && (
+                <LocationSheet
+                    sheet={sheet}
+                    setSheet={setSheet}
+                    options={continentOptions}
+                    current={fullPath}
+                    onPick={onPick}
+                    onLoad={load}
+                    onMinimize={onMinimize}
+                />
+            )}
         </Flex>
     );
 }
@@ -666,6 +915,15 @@ const Wanderer = () => {
     const [selected, setSelected] = useState(savedSelection.selected); // tree key: a continent or a country
     const [subArea, setSubArea] = useState(savedSelection.subArea); // cascader path inside the selected country
     const [showMap, setShowMap] = useState(() => loadSetting('showMap') !== 'false'); // desktop mini map
+    // Panel collapsed to just the logo + country (toggled by clicking the logo), remembered in this browser
+    const [panelCollapsed, setPanelCollapsed] = useState(() => loadSetting('panelCollapsed') === 'true');
+    const panelRef = useRef(null);
+    const panelBefore = useRef(null); // panel's size right before restoring (for the animation)
+    // Collapse animation running: the full content stays (fading out, the logo in place) while the box shrinks
+    // to the logo; only at the end does it switch to the collapsed content
+    const [collapsing, setCollapsing] = useState(false);
+    const collapseAnimation = useRef(null);
+    const unpinContent = useRef(null); // undoes pinContentWidth() after the collapse
     // Desktop mini map height in px when pinned (stays that height when the panel is resized), null = square, follows the panel
     // Default (nothing saved yet): pinned at the smallest size; a saved '' means the user unpinned it
     const [pinnedMapSize, setPinnedMapSize] = useState(() => {
@@ -678,16 +936,20 @@ const Wanderer = () => {
     const [coordsInput, setCoordsInput] = useState('');
     const isPhone = useIsPhone();
     // Phone bottom sheet levels, changed by swiping: 0 = minimized (country, date, random button),
-    // 1 = normal (everything, including the area breadcrumb)
+    // 1 = normal (everything, including the area breadcrumb); swiping above 1 opens the location picker sheet
+    // (a 3rd level). A hard swipe moves two levels
     const [sheetLevel, setSheetLevel] = useState(1);
     const touchStartY = useRef(null);
     const touchStartTime = useRef(0);
     const minimized = isPhone && sheetLevel === 0;
+    // Phone location picker sheet: { open, stack (path of the list shown), direction (slide) }
+    const [locationSheet, setLocationSheet] = useState({ open: false, stack: [], direction: 'none' });
+    const [searchSignal, setSearchSignal] = useState(0); // desktop: bumped by the S key to open the location search
     const showCountries = !minimized;
     let antdTheme = theme.useToken()
     function handleTouchStart(e) {
-        // Swipes inside the country selection are for scrolling, not for the sheet
-        touchStartY.current = e.target.closest('.sheet-extra') ? null : e.touches[0].clientY;
+        // Not swipes inside the location sheet / menus (they're portals, their touches bubble here too)
+        touchStartY.current = e.target.closest('.ant-drawer, .ant-popover') ? null : e.touches[0].clientY;
         touchStartTime.current = e.timeStamp;
     }
 
@@ -701,6 +963,11 @@ const Wanderer = () => {
         const speed = Math.abs(dy) / Math.max(e.timeStamp - touchStartTime.current, 1); // px per ms
         const hard = speed > 1.2 || Math.abs(dy) > 200;
         const step = (hard ? 2 : 1) * (dy < 0 ? 1 : -1); // up = higher level
+        // Going above the full panel opens the location picker (the 3rd level), at the current selection's
+        // level (e.g. Bình Tân selected: Hồ Chí Minh's districts). A hard swipe from minimized gets there at once
+        if (sheetLevel + step > 1) {
+            setLocationSheet({ open: true, stack: selectionPath().slice(0, -1), direction: 'none' });
+        }
         setSheetLevel((level) => Math.min(Math.max(level + step, 0), 1));
     }
     const [messageApi, messageContext] = message.useMessage();
@@ -845,6 +1112,12 @@ const Wanderer = () => {
         saveSetting('showMap', String(show));
     }
 
+    // Current selection as a full path: [continent, country, level 1, level 2] ([] = anywhere)
+    function selectionPath() {
+        if (!selected) return [];
+        return COUNTRIES[selected] ? [`continent:${COUNTRIES[selected].continent}`, selected, ...subArea] : [selected];
+    }
+
     // Breadcrumb pick: [continent, country, level 1, level 2] (any length; [] = anywhere)
     function handlePickPath(path) {
         setSelected(path[1] ?? path[0] ?? null);
@@ -882,13 +1155,142 @@ const Wanderer = () => {
         setLoading(false);
     }
 
-    // Space bar = the Random / Go button, unless typing in a field (or a button / link has focus, where Space
-    // already clicks it). Keys pressed while the Street View has focus go to Google's iframe, not this page
+    // Dragging the Street View (Google's iframe) and releasing the mouse over the panel: the button-up goes to
+    // this page, never to the iframe, which then keeps rotating as if the button were still held. So while a
+    // drag that started in an iframe is over the panel, let the mouse pass through to the iframe (.iframe-drag
+    // in index.css) so it receives the release. A drag "started in an iframe" = the mouse moves here with a
+    // button held but the button was never pressed on this page. Renewed every move, dropped 250 ms after
+    useEffect(() => {
+        let pressedHere = false;
+        let timer;
+        const root = document.documentElement;
+        const onDown = () => { pressedHere = true; };
+        const onUp = () => { pressedHere = false; };
+        const onMove = (e) => {
+            if (e.pointerType !== 'mouse' || !e.buttons || pressedHere) return;
+            root.classList.add('iframe-drag');
+            clearTimeout(timer);
+            timer = setTimeout(() => root.classList.remove('iframe-drag'), 250);
+        };
+        window.addEventListener('pointerdown', onDown, true);
+        window.addEventListener('pointerup', onUp, true);
+        window.addEventListener('pointermove', onMove, true);
+        return () => {
+            window.removeEventListener('pointerdown', onDown, true);
+            window.removeEventListener('pointerup', onUp, true);
+            window.removeEventListener('pointermove', onMove, true);
+            clearTimeout(timer);
+            root.classList.remove('iframe-drag');
+        };
+    }, [])
+
+    // Clicking / dragging the Street View or the map moves keyboard focus into Google's iframe, and key presses
+    // (Space) then go there instead of this page. Take focus back right away; the mouse keeps working in the
+    // iframe. Trade-off: the viewer's own keyboard controls (arrow keys, + / -) no longer get the keys
+    useEffect(() => {
+        document.body.tabIndex = -1; // so the page itself can hold focus
+        const onBlur = () => setTimeout(() => {
+            if (document.activeElement?.tagName === 'IFRAME') document.body.focus({ preventScroll: true });
+        }, 0);
+        window.addEventListener('blur', onBlur);
+        return () => window.removeEventListener('blur', onBlur);
+    }, [])
+
+    // While the box animates, keep the content at its full width (the box only clips it), so nothing inside
+    // reflows: otherwise the header gets narrower than the logo and the logo shrinks for a moment
+    const pinContentWidth = (panel) => {
+        const content = panel.querySelector('.panel-body');
+        content.style.width = `${content.getBoundingClientRect().width}px`;
+        content.style.flexShrink = '0';
+        return () => {
+            content.style.width = '';
+            content.style.flexShrink = '';
+        };
+    };
+
+    // Collapse: shrink the box from the full panel to the collapsed size (worked out from the logo button, the
+    // panel's padding and a line for the country) while everything but the logo fades out (.panel-collapsing).
+    // The logo stays put at the top left, so it looks like the panel folds into it. At the end, switch to the
+    // collapsed content. On the phone the card also moves 10 px in from the screen's left / bottom edges
+    useLayoutEffect(() => {
+        if (!collapsing) return;
+        const panel = panelRef.current;
+        const before = panel.getBoundingClientRect();
+        const logoButtonEl = panel.querySelector('.logo-button');
+        const logoBox = logoButtonEl.getBoundingClientRect();
+        const contentEl = panel.querySelector('.panel-body');
+        const body = getComputedStyle(contentEl);
+        const px = (value) => parseFloat(value) || 0;
+        const borders = panel.offsetWidth - panel.clientWidth;
+        // Everything above the logo in the content (the phone's drag handle, which the collapsed card has too)
+        const aboveLogo = logoBox.top - contentEl.getBoundingClientRect().top;
+        const width = logoBox.width + px(getComputedStyle(logoButtonEl).marginLeft)
+            + px(body.paddingLeft) + px(body.paddingRight) + borders;
+        const height = aboveLogo + logoBox.height + 2 + (px(body.lineHeight) || 22) + px(body.paddingBottom) + borders;
+        const move = isPhone ? 'translate(10px, -10px)' : 'none';
+        panel.style.overflow = 'hidden';
+        unpinContent.current = pinContentWidth(panel);
+        const animation = panel.animate([
+            { width: `${before.width}px`, height: `${before.height}px`, transform: 'none' },
+            { width: `${width}px`, height: `${height}px`, transform: move },
+        ], { duration: 300, easing: 'ease', fill: 'forwards' });
+        collapseAnimation.current = animation;
+        animation.onfinish = () => {
+            setPanelCollapsed(true);
+            setCollapsing(false);
+            saveSetting('panelCollapsed', 'true');
+        };
+    }, [collapsing]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // After the collapse: the collapsed content now has (about) the size the box was shrunk to, drop the
+    // animation. Restore: grow the box from the collapsed size to the full panel (before paint, so there's no
+    // flash), anchored at the top left (desktop) or bottom left (phone sheet) with a translate for the move
+    useLayoutEffect(() => {
+        const panel = panelRef.current;
+        if (!panel) return;
+        if (collapseAnimation.current) {
+            collapseAnimation.current.cancel();
+            collapseAnimation.current = null;
+            panel.style.overflow = '';
+            unpinContent.current?.();
+            unpinContent.current = null;
+        }
+        const before = panelBefore.current;
+        panelBefore.current = null;
+        if (!before) return;
+        const after = panel.getBoundingClientRect();
+        const dx = before.left - after.left;
+        const dy = isPhone ? before.bottom - after.bottom : before.top - after.top;
+        panel.style.overflow = 'hidden'; // clip the content while the box grows
+        const unpin = pinContentWidth(panel); // the full panel's content width
+        const animation = panel.animate([
+            { width: `${before.width}px`, height: `${before.height}px`, transform: `translate(${dx}px, ${dy}px)` },
+            { width: `${after.width}px`, height: `${after.height}px`, transform: 'none' },
+        ], { duration: 300, easing: 'ease' });
+        animation.onfinish = animation.oncancel = () => {
+            panel.style.overflow = '';
+            unpin();
+        };
+        // Restoring mounts the whole panel, which keeps the browser busy for a moment and would eat most of the
+        // animation: hold it at the start until two frames have been drawn, then play it in full
+        animation.pause();
+        requestAnimationFrame(() => requestAnimationFrame(() => animation.play()));
+    }, [panelCollapsed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Keyboard shortcuts, unless typing in a field (or a button / link has focus, where Space already clicks it):
+    // Space = the Random / Go button; S = location search (desktop: the menu of the last breadcrumb location;
+    // phone: the location sheet), with the search box focused
     useEffect(() => {
         const onKeyDown = (e) => {
-            if (e.code !== 'Space' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+            if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+            if (e.code !== 'Space' && e.code !== 'KeyS') return;
             if (e.target.closest('input, textarea, select, button, a, [contenteditable="true"]')) return;
-            e.preventDefault();
+            e.preventDefault(); // also keeps the "s" out of the search box that's about to get focus
+            if (e.code === 'KeyS') {
+                if (isPhone) setLocationSheet({ open: true, stack: selectionPath().slice(0, -1), direction: 'none', focusSearch: true });
+                else setSearchSignal((n) => n + 1);
+                return;
+            }
             if (loading) return;
             if (goTo) handleGoTo();
             else handleRandom();
@@ -896,6 +1298,41 @@ const Wanderer = () => {
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
     });
+
+    // Spinner instead of the flag while searching for a location or looking up its country
+    const countryBusy = loading || country === undefined;
+
+    // Collapse: run the fold-into-the-logo animation first (the layout effects above). Restore: remember the
+    // collapsed size, switch to the full panel and grow the box from that size
+    function togglePanelCollapsed() {
+        if (collapsing) return;
+        if (!panelCollapsed) {
+            setCollapsing(true);
+            return;
+        }
+        panelBefore.current = panelRef.current?.getBoundingClientRect();
+        setPanelCollapsed(false);
+        saveSetting('panelCollapsed', 'false');
+    }
+
+    // The logo is black; invert it to white in dark mode. Clicking it collapses / restores the panel
+    const logoButton = (
+        <Button
+            type="text"
+            size="large"
+            className="logo-button"
+            aria-label={panelCollapsed ? 'Show the panel' : 'Collapse the panel'}
+            title={panelCollapsed ? 'Show the panel' : 'Collapse the panel'}
+            onClick={togglePanelCollapsed}
+        >
+            <img
+                src={logo}
+                alt="NuTetris"
+                className="logo"
+                style={{ filter: modeTheme === 'dark' ? 'invert(1)' : 'none', height: 18 }}
+            />
+        </Button>
+    );
 
     if (!API_KEY) return <p>Missing VITE_GOOGLE_MAPS_API_KEY. Add it to .env.local and restart the dev server.</p>;
     if (!ready) return null;
@@ -907,136 +1344,156 @@ const Wanderer = () => {
             {isPhone && <MiniMap apiKey={API_KEY} position={position} className="minimap minimap-floating" />}
             {/* Card body is a flex column (see .panel-body) so only the country list scrolls */}
             <Card
-                className="panel"
+                ref={panelRef}
+                className={`panel${panelCollapsed ? ' panel-collapsed' : ''}${collapsing ? ' panel-collapsing' : ''}`}
                 classNames={{ body: 'panel-body' }}
-                style={isPhone ? undefined : { width: panelWidth }}
-                onTouchStart={isPhone ? handleTouchStart : undefined}
-                onTouchEnd={isPhone ? handleTouchEnd : undefined}
+                style={isPhone || panelCollapsed ? undefined : { width: panelWidth }}
+                onTouchStart={isPhone && !panelCollapsed ? handleTouchStart : undefined}
+                onTouchEnd={isPhone && !panelCollapsed ? handleTouchEnd : undefined}
                 onTouchCancel={() => { touchStartY.current = null; }}
             >
-                {/* Desktop: draggable right edge to resize the panel */}
-                {!isPhone && <div className="panel-resize" onPointerDown={handleResizeStart} />}
-                {/* Phone: drag handle, also tappable */}
-                {isPhone && <div className="sheet-handle" onClick={() => setSheetLevel(sheetLevel === 1 ? 0 : 1)} />}
-                {/* Logo and theme switch, hidden (sliding) when the phone sheet is minimized */}
-                <div className={`sheet-section${minimized ? ' collapsed' : ''}`}>
-                    <div className="sheet-section-inner">
-                        <Flex align="center" justify="space-between" gap={8}>
-                            {/* The logo is black; invert it to white in dark mode */}
-                            <img
-                                src={logo}
-                                alt="NuTetris"
-                                className="logo"
-                                style={{ filter: modeTheme === 'dark' ? 'invert(1)' : 'none', height: 18 }}
-                            />
-                            <ThemeSwitch />
-                        </Flex>
+                {panelCollapsed ? (
+                    // Collapsed: just the logo and the country below it, cut with "…" at the logo's width
+                    // (align start: the logo button keeps its own width, so the logo doesn't move)
+                    <Flex vertical gap={2} align="start">
+                        {/* Phone: the sheet's drag handle here too (tap = show the panel), so the logo sits where it
+                            does in the full sheet and doesn't jump when collapsing / restoring */}
+                        {isPhone && <div className="sheet-handle sheet-handle-collapsed" onClick={togglePanelCollapsed} />}
+                        {logoButton}
+                        <Typography.Text strong ellipsis={{ tooltip: country?.name }} className="collapsed-country">
+                            <CountryFlag country={country} busy={countryBusy} />
+                            {country === undefined ? '…' : country?.name || 'Unknown country'}
+                        </Typography.Text>
+                    </Flex>
+                ) : (<>
+                    {/* Desktop: draggable right edge to resize the panel */}
+                    {!isPhone && <div className="panel-resize" onPointerDown={handleResizeStart} />}
+                    {/* Phone: drag handle, also tappable */}
+                    {isPhone && <div className="sheet-handle" onClick={() => setSheetLevel(sheetLevel === 1 ? 0 : 1)} />}
+                    {/* Logo and theme switch, hidden (sliding) when the phone sheet is minimized */}
+                    <div className={`sheet-section panel-header${minimized ? ' collapsed' : ''}`}>
+                        <div className="sheet-section-inner">
+                            <Flex align="center" justify="space-between" gap={8}>
+                                {logoButton}
+                                <ThemeSwitch />
+                            </Flex>
+                        </div>
                     </div>
-                </div>
-                {/* Both views stay rendered so switching between minimized and normal can slide (see .sheet-section) */}
-                <div className={`sheet-section${minimized ? '' : ' collapsed'}`}>
-                    <div className="sheet-section-inner">
-                        <LocationInfo data={currentData} country={country} dates={dates} current={current} onDateChange={handleDateChange} compact />
+                    {/* Both views stay rendered so switching between minimized and normal can slide (see .sheet-section) */}
+                    <div className={`sheet-section${minimized ? '' : ' collapsed'}`}>
+                        <div className="sheet-section-inner">
+                            <LocationInfo data={currentData} country={country} busy={countryBusy} dates={dates} current={current} onDateChange={handleDateChange} compact />
+                        </div>
                     </div>
-                </div>
-                <div className={`sheet-section${minimized ? ' collapsed' : ''}`}>
-                    <div className="sheet-section-inner">
-                        {isPhone ? (
-                            <LocationInfo data={currentData} country={country} dates={dates} current={current} onDateChange={handleDateChange} />
-                        ) : (
-                            // Desktop: mini map as the card's cover image, location info as its content
-                            <Card
-                                hoverable
-                                style={{
-                                    boxShadow: antdTheme.token.boxShadow
-                                }}
-                                styles={{
-                                    body: {
-                                        padding: 8
-                                    }
-                                }}
-                                size="small"
-                                className="location-card"
-                                cover={
-                                    // Stays mounted and slides open/closed (see .map-reveal), so toggling doesn't reload the map
-                                    <div className={`map-reveal${showMap ? '' : ' collapsed'}`}>
-                                        <div className="map-reveal-inner" ref={mapBoxRef}>
-                                            <MiniMap
-                                                apiKey={API_KEY}
-                                                position={position}
-                                                className="minimap"
-                                                // Pinned: fixed height, width still follows the panel (no longer square)
-                                                style={pinnedMapSize ? { height: pinnedMapSize, aspectRatio: 'auto' } : undefined}
-                                            />
+                    <div className={`sheet-section${minimized ? ' collapsed' : ''}`}>
+                        <div className="sheet-section-inner">
+                            {isPhone ? (
+                                <LocationInfo data={currentData} country={country} busy={countryBusy} dates={dates} current={current} onDateChange={handleDateChange} />
+                            ) : (
+                                // Desktop: mini map as the card's cover image, location info as its content
+                                <Card
+                                    hoverable
+                                    style={{
+                                        boxShadow: antdTheme.token.boxShadow
+                                    }}
+                                    styles={{
+                                        body: {
+                                            padding: 8
+                                        }
+                                    }}
+                                    size="small"
+                                    className="location-card"
+                                    cover={
+                                        // Stays mounted and slides open/closed (see .map-reveal), so toggling doesn't reload the map
+                                        <div className={`map-reveal${showMap ? '' : ' collapsed'}`}>
+                                            <div className="map-reveal-inner" ref={mapBoxRef}>
+                                                <MiniMap
+                                                    apiKey={API_KEY}
+                                                    position={position}
+                                                    className="minimap"
+                                                    // Pinned: fixed height, width still follows the panel (no longer square)
+                                                    style={pinnedMapSize ? { height: pinnedMapSize, aspectRatio: 'auto' } : undefined}
+                                                />
+                                            </div>
                                         </div>
-                                    </div>
-                                }
-                            >
-                                <LocationInfo
-                                    data={currentData}
-                                    country={country}
-                                    dates={dates}
-                                    current={current}
-                                    onDateChange={handleDateChange}
-                                    // Hide the mini map to leave more room for the country list
-                                    countryExtra={
-                                        <Flex align="center" gap={2}>
-                                            <Button
-                                                shape='circle'
-                                                type="text"
-                                                size="small"
-                                                icon={pinnedMapSize ? <PushpinFilled /> : <PushpinOutlined />}
-                                                onClick={togglePinMap}
-                                                disabled={!showMap}
-                                                title={pinnedMapSize ? 'Unpin map height' : 'Pin map height'}
-                                            />
-                                            <Button
-                                                shape='circle'
-                                                type="text"
-                                                size="small"
-                                                icon={showMap ? <EyeTwoTone twoToneColor={green.primary} /> : <EyeInvisibleTwoTone />}
-                                                onClick={(e) => toggleMap(!showMap)}
-                                                // disabled={!showMap}
-                                                title={showMap ? 'Hide map' : 'Show map'}
-                                            />
-                                        </Flex>
                                     }
-                                />
-                            </Card>
-                        )}
+                                >
+                                    <LocationInfo
+                                        data={currentData}
+                                        country={country}
+                                        busy={countryBusy}
+                                        dates={dates}
+                                        current={current}
+                                        onDateChange={handleDateChange}
+                                        // Hide the mini map to leave more room for the country list
+                                        countryExtra={
+                                            <Flex align="center" gap={2}>
+                                                <Button
+                                                    shape='circle'
+                                                    type="text"
+                                                    size="small"
+                                                    icon={pinnedMapSize ? <PushpinFilled /> : <PushpinOutlined />}
+                                                    onClick={togglePinMap}
+                                                    disabled={!showMap}
+                                                    title={pinnedMapSize ? 'Unpin map height' : 'Pin map height'}
+                                                />
+                                                <Button
+                                                    shape='circle'
+                                                    type="text"
+                                                    size="small"
+                                                    icon={showMap ? <EyeTwoTone twoToneColor={green.primary} /> : <EyeInvisibleTwoTone />}
+                                                    onClick={(e) => toggleMap(!showMap)}
+                                                    // disabled={!showMap}
+                                                    title={showMap ? 'Hide map' : 'Show map'}
+                                                />
+                                            </Flex>
+                                        }
+                                    />
+                                </Card>
+                            )}
+                        </div>
                     </div>
-                </div>
-                {/* Coordinates field + one button: "Go" when the field has other coordinates than the current
-                    location, otherwise "Random". The field is hidden in the minimized phone sheet */}
-                {/* Field takes the remaining width, the button keeps its own width, so resizing the panel only
-                    stretches the field. Minimized phone sheet: no field, the button fills the row */}
-                <Flex gap={8}>
-                    {!minimized && (
-                        <Input
-                            value={coordsInput}
-                            onChange={(e) => setCoordsInput(e.target.value)}
-                            onFocus={(e) => e.target.select()} // so pasting replaces the old coordinates
-                            onPressEnter={handleGoTo}
-                            placeholder="lat, lng"
-                            disabled={loading}
-                            style={{ flex: 1, minWidth: 0 }}
+                    {/* Coordinates field + one button: "Go" when the field has other coordinates than the current
+                        location, otherwise "Random". The field is hidden in the minimized phone sheet */}
+                    {/* Field takes the remaining width, the button keeps its own width, so resizing the panel only
+                        stretches the field. Minimized phone sheet: no field, the button fills the row */}
+                    <Flex gap={8}>
+                        {!minimized && (
+                            <Input
+                                value={coordsInput}
+                                onChange={(e) => setCoordsInput(e.target.value)}
+                                onFocus={(e) => e.target.select()} // so pasting replaces the old coordinates
+                                onPressEnter={handleGoTo}
+                                placeholder="lat, lng"
+                                disabled={loading}
+                                style={{ flex: 1, minWidth: 0 }}
+                            />
+                        )}
+                        <Button
+                            color={goTo ? "green" : "primary"}
+                            variant="solid"
+                            icon={goTo ? <AimOutlined /> : <CompassOutlined />}
+                            onClick={goTo ? handleGoTo : handleRandom}
+                            loading={loading}
+                            style={minimized ? { flex: 1 } : { flexShrink: 0, width: 88 }}
+                        >
+                            {goTo ? 'Go' : 'Rand'}
+                        </Button>
+                    </Flex>
+                    {/* Area selection; on phones it slides away when the sheet is minimized (see .sheet-extra) */}
+                    <div className={`sheet-extra${showCountries ? ' open' : ''}`}>
+                        <SelectionBreadcrumb
+                            selected={selected}
+                            subArea={subArea}
+                            onPick={handlePickPath}
+                            isPhone={isPhone}
+                            sheet={locationSheet}
+                            setSheet={setLocationSheet}
+                            onMinimize={() => setSheetLevel(0)}
+                            searchSignal={searchSignal}
                         />
-                    )}
-                    <Button
-                        color={goTo ? "green" : "primary"}
-                        variant="solid"
-                        icon={goTo ? <AimOutlined /> : <CompassOutlined />}
-                        onClick={goTo ? handleGoTo : handleRandom}
-                        loading={loading}
-                        style={minimized ? { flex: 1 } : { flexShrink: 0, width: 88 }}
-                    >
-                        {goTo ? 'Go' : 'Rand'}
-                    </Button>
-                </Flex>
-                {/* Area selection; on phones it slides away when the sheet is minimized (see .sheet-extra) */}
-                <div className={`sheet-extra${showCountries ? ' open' : ''}`}>
-                    <SelectionBreadcrumb selected={selected} subArea={subArea} onPick={handlePickPath} />
-                </div>
+                    </div>
+                </>)}
             </Card>
         </>
     );

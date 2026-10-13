@@ -8,6 +8,11 @@ body {
     margin: 0
 }
 
+/* The page takes keyboard focus back from the Street View / map iframes (App.jsx): no focus outline for that */
+body:focus {
+    outline: none;
+}
+
 /* Street View fills the screen; dvh accounts for the mobile browser's address bar */
 .viewer {
     display: block;
@@ -82,8 +87,34 @@ body {
     }
 }
 
+/* Header buttons: keep their padding (room for the hover background) but pull them outwards by it, so the
+   logo's left edge and the sun / moon icon's right edge line up with the mini map's edges */
+/* 6 px between the content and the button's edge on every side */
+.ant-btn.logo-button {
+    height: auto;
+    padding: 6px;
+    border: 0 !important; /* no antd border, also not the 1 px one it adds on hover (shifted the layout) */
+    margin-left: -6px;
+    margin-top:-6px;
+    margin-right:-6px;
+    min-width: 0;
+    border-radius: 4px;
+}
+
+/* Extra classes so this beats antd's large icon-only button size (40 px) */
+.ant-btn.ant-btn-icon-only.theme-button {
+    width: 28px; /* 16 px icon + 6 px each side */
+    min-width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0 !important; /* also on hover */
+    margin-right: -6px;
+    margin-top:-6px;
+}
+
 .logo {
     display: block;
+    aspect-ratio: 744 / 132; /* the SVG's size: the width is known before the image has loaded (no 0-width flash) */
     height: 32px;
     width: auto;
     min-width: 0; /* shrink rather than push the theme switch out on narrow panels */
@@ -95,6 +126,15 @@ body {
     margin-right: 6px;
     vertical-align: -2px;
     border-radius: 2px;
+}
+
+/* Spinner in place of the flag while a location / its country loads: same width, so the name doesn't move */
+.flag-loading {
+    display: inline-flex;
+    justify-content: center;
+    width: 20px;
+    font-size: 14px;
+    vertical-align: -1px;
 }
 
 /* Breadcrumb location menu: search box + cascader columns (scroll sideways on narrow screens) */
@@ -124,6 +164,90 @@ body {
 /* Highlighted result (mouse or arrow keys) */
 .area-search-result.active {
     background: rgba(128, 128, 128, 0.15);
+}
+
+/* Phone location sheet: search box on top, one scrolling list below */
+.area-drill-title {
+    font-weight: 600;
+}
+
+.area-drill-search {
+    padding: 8px 16px;
+}
+
+/* Wraps search + list; catches the sheet's swipes. Clips the list while it slides in */
+.area-drill-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow-x: hidden;
+}
+
+.area-drill-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain; /* don't let a downward swipe trigger the browser's pull-to-refresh */
+    padding: 0 8px 16px;
+}
+
+/* Level changes: the new list slides in from the right (going in) or the left (going back) */
+.area-drill-list.slide-forward {
+    animation: drill-in-from-right 0.25s ease;
+}
+
+.area-drill-list.slide-back {
+    animation: drill-in-from-left 0.25s ease;
+}
+
+@keyframes drill-in-from-right {
+    from { transform: translateX(40%); opacity: 0; }
+    to { transform: none; opacity: 1; }
+}
+
+@keyframes drill-in-from-left {
+    from { transform: translateX(-40%); opacity: 0; }
+    to { transform: none; opacity: 1; }
+}
+
+.area-drill-list .area-search-result {
+    padding: 10px 8px; /* bigger touch targets */
+}
+
+.area-drill-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 0 8px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.area-drill-row:active {
+    background: rgba(128, 128, 128, 0.15);
+}
+
+/* The picked option and its parents */
+.area-drill-row.selected {
+    font-weight: 600;
+}
+
+.area-drill-check {
+    width: 16px;
+    flex-shrink: 0;
+    color: #1677ff;
+}
+
+.area-drill-label {
+    flex: 1;
+    min-width: 0;
+}
+
+.area-drill-chevron {
+    opacity: 0.5;
+    font-size: 12px;
 }
 
 .area-search-more {
@@ -230,4 +354,76 @@ body {
         margin-top: 0;
         opacity: 1;
     }
+}
+
+/* Theme switch: fade all colors for a moment (class added briefly by fadeThemeChange in App.jsx).
+   !important so antd's own (often instant) transitions don't win while it's on */
+.theme-fade,
+.theme-fade *,
+.theme-fade *::before,
+.theme-fade *::after {
+    transition: background-color 0.4s ease, color 0.4s ease, border-color 0.4s ease, fill 0.4s ease,
+        box-shadow 0.4s ease, filter 0.4s ease !important;
+}
+
+/* A Street View drag (in Google's iframe) passing over the panel: let the mouse through to the iframe so it
+   gets the button release (class set briefly in App.jsx) */
+.iframe-drag .panel,
+.iframe-drag .minimap-floating {
+    pointer-events: none;
+}
+
+/* Same height with or without the × clear button (24 px, antd's small button), so the panel doesn't shift
+   between "Anywhere" and a selection */
+.selection-breadcrumb {
+    min-height: 24px;
+}
+
+/* Panel collapsed by the logo button: only the logo and the country, as wide as the logo */
+.panel.panel-collapsed {
+    width: auto;
+}
+
+/* Takes the logo's width without widening the panel (width 0, then stretched to the container),
+   so a long country name is cut with "…" */
+/* Phone collapsed card's drag handle: same space below it as in the full sheet (4 px margin + 8 px gap there,
+   2 px gap here), so the logo sits at the same height in both */
+.sheet-handle-collapsed {
+    margin-bottom: 10px;
+}
+
+.collapsed-country {
+    display: block;
+    width: 0;
+    min-width: 100%;
+}
+
+@media (max-width: 600px) {
+    /* Phone: a small card in the bottom left instead of the full-width sheet */
+    .panel.panel-collapsed {
+        left: 10px;
+        right: auto;
+        bottom: 10px;
+        width: auto;
+        border-radius: 12px;
+        border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+    }
+}
+
+/* Collapsing (App.jsx): while the box shrinks into the logo, everything but the logo fades out */
+.panel-collapsing .panel-body > :not(.panel-header),
+.panel-collapsing .theme-button {
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+/* Restoring: the panel's content fades in as the box grows; the collapsed card's country line fades in too */
+.panel:not(.panel-collapsed):not(.panel-collapsing) .panel-body > :not(.panel-header),
+.collapsed-country {
+    animation: panel-content-in 0.3s ease;
+}
+
+@keyframes panel-content-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
 }

@@ -23,8 +23,8 @@ export const CONTINENTS = CONTINENT_ORDER
         .sort((a, b) => a.name.localeCompare(b.name))])
     .filter(([, countries]) => countries.length);
 
-// GADM's JSON files drop the spaces from names ("AnGiang", "ChâuĐốc"); add them back for display only
-export const prettyName = (name) => name.replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2');
+// GADM's JSON files drop the spaces from names ("AnGiang", "Quận1"); add them back for display only
+export const prettyName = (name) => name.replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2').replace(/(\p{L})(\d)/gu, '$1 $2');
 
 // Downloaded files, cached as promises so each is fetched and unzipped once
 const files = new Map();

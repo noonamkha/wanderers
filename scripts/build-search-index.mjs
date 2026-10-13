@@ -9,7 +9,7 @@ const index = JSON.parse(fs.readFileSync(new URL('../src/gadm-index.json', impor
 const dir = new URL('../public/gadm/', import.meta.url);
 
 // Same as prettyName() in src/gadm.js: GADM's JSON files drop the spaces from names
-const prettyName = (name) => name.replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2');
+const prettyName = (name) => name.replace(/(\p{Ll})(\p{Lu})/gu, '$1 $2').replace(/(\p{L})(\d)/gu, '$1 $2');
 
 function readLevel(code, level) {
     const zip = fs.readFileSync(new URL(`gadm41_${code}_${level}.json.zip`, dir));
