@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "gadm": "node scripts/download-gadm.mjs",
+    "gadm": "node scripts/download-gadm.mjs && node scripts/build-search-index.mjs",
     "gadm:index": "node scripts/build-gadm-index.mjs",
     "lint": "eslint .",
     "preview": "vite preview"

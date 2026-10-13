@@ -97,43 +97,50 @@ body {
     border-radius: 2px;
 }
 
-/* Narrow-down cascader under the selected country in the tree */
-.tree-node-extra {
-    padding: 4px 0;
-    cursor: default;
+/* Breadcrumb location menu: search box + cascader columns (scroll sideways on narrow screens) */
+.area-menu {
+    max-width: calc(100vw - 32px);
+    overflow-x: auto;
 }
 
-/* Let the tree row (and the cascader in it) shrink to the panel width instead of overflowing sideways */
-.country-list .ant-tree-node-content-wrapper,
-.country-list .ant-tree-title {
-    min-width: 0;
+/* Fixed column height: if opening a level added a taller column, the menu (often opening upwards) would
+   grow and shift under the cursor */
+.area-menu .ant-cascader-menu {
+    height: 300px;
 }
 
-.country-list .ant-tree-title {
+.area-search-results {
+    max-height: 300px;
+    min-width: 220px;
+    overflow-y: auto;
+}
+
+.area-search-result {
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+/* Highlighted result (mouse or arrow keys) */
+.area-search-result.active {
+    background: rgba(128, 128, 128, 0.15);
+}
+
+.area-search-more {
     display: block;
+    padding: 4px 8px;
+    font-size: 12px;
 }
 
-.tree-node-extra .ant-cascader {
-    min-width: 0;
-    max-width: 100%;
-}
-
-/* Only the country list scrolls; everything else in the panel keeps its size */
+/* Panel items keep their size */
 .panel-body > * {
     flex-shrink: 0;
 }
 
 .panel-body > .sheet-extra {
-    flex-shrink: 1;
-    min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 8px;
-}
-
-.sheet-extra > .country-list {
-    overflow-y: auto;
-    min-height: 0;
 }
 
 .minimap {
@@ -201,31 +208,15 @@ body {
         max-height: 80dvh;
         border-radius: 12px 12px 0 0;
         border-bottom: 0;
-        /* Lets height animate from auto (Chrome/Edge; other browsers just jump) */
-        interpolate-size: allow-keywords;
-        transition: height 0.3s ease;
     }
 
     /* Stop the browser from treating swipes on the panel as page scrolling (which cancels them),
-       so the sheet's own swipe handling gets them. The country list still scrolls */
+       so the sheet's own swipe handling gets them */
     .panel {
         touch-action: none;
     }
 
-    .panel .country-list {
-        touch-action: pan-y;
-    }
-
-    /* Swiped up: the sheet takes half the screen */
-    .panel.open {
-        height: 80dvh;
-    }
-
-    .panel.open .panel-body {
-        flex: 1;
-    }
-
-    /* Country selection slides open/closed */
+    /* Area breadcrumb slides away when the sheet is minimized */
     .panel-body > .sheet-extra {
         max-height: 0;
         margin-top: -8px; /* cancel the panel gap while closed */
@@ -235,8 +226,7 @@ body {
     }
 
     .panel-body > .sheet-extra.open {
-        flex: 1;
-        max-height: 80dvh;
+        max-height: 120px;
         margin-top: 0;
         opacity: 1;
     }

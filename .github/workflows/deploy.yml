@@ -25,11 +25,11 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # GADM boundary files aren't in the repo; download them (cached between runs)
+      # GADM boundary files and the search index aren't in the repo; download / build them (cached between runs)
       - uses: actions/cache@v4
         with:
           path: public/gadm
-          key: gadm-${{ hashFiles('src/gadm-index.json') }}
+          key: gadm-${{ hashFiles('src/gadm-index.json', 'scripts/build-search-index.mjs') }}
       - run: npm run gadm
       - run: npm run build
         env:

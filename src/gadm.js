@@ -87,3 +87,19 @@ export async function countryAt({ lat, lng }) {
 }
 
 const boxArea = ([w, s, e, n]) => (e - w) * (n - s);
+
+// Names of every level 1 / 2 area, for searching all locations (no borders):
+// { [countryCode]: [[gid1, name1, [[gid2, name2], ...]], ...] }, built by scripts/build-search-index.mjs
+let searchIndex = null;
+export function loadSearchIndex() {
+    searchIndex ??= fetch(`${import.meta.env.BASE_URL}gadm/search-index.json`)
+        .then((res) => {
+            if (!res.ok) throw new Error(`Search index: HTTP ${res.status}`);
+            return res.json();
+        })
+        .catch((e) => {
+            searchIndex = null; // allow a retry
+            throw e;
+        });
+    return searchIndex;
+}
