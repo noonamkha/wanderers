@@ -35,6 +35,42 @@ body:focus {
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
 }
 
+/* Desktop: the location card and the panel below it, in one column at the panel's position. The column
+   has the width (resizable); both cards fill it, the collapsed panel shrinks to its logo */
+.panel-stack {
+    position: absolute;
+    top: 75px;
+    left: 10px;
+    z-index: 1;
+    width: 250px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.panel-stack > .panel {
+    position: relative;
+    top: auto;
+    left: auto;
+}
+
+.panel-stack > .panel:not(.panel-collapsed),
+.panel-stack > .location-card {
+    width: 100%;
+}
+
+.panel-stack > .location-card {
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+    animation: panel-content-in 0.3s ease; /* restoring the panel */
+}
+
+/* Collapsing the panel: the location card fades out while the panel folds into its logo */
+.panel-stack-collapsing > .location-card {
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
 /* Desktop: invisible grab area on the panel's right edge for resizing */
 .panel-resize {
     position: absolute;
@@ -110,6 +146,28 @@ body:focus {
     border: 0 !important; /* also on hover */
     margin-right: -6px;
     margin-top:-6px;
+}
+
+/* Header's coordinates button: same size as the theme button next to it */
+.ant-btn.ant-btn-icon-only.coords-button {
+    width: 28px;
+    min-width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0 !important; /* also on hover */
+    margin-top: -6px;
+}
+
+/* Field + button in one control (Space.Compact): the field takes the remaining width, the button keeps its own */
+.ant-space-compact-block > .ant-input,
+.ant-space-compact-block > .ant-input-affix-wrapper {
+    flex: 1;
+    min-width: 0;
+}
+
+.ant-btn.action-button {
+    flex-shrink: 0;
+    /* width: 64px; */
 }
 
 .logo {
@@ -282,6 +340,32 @@ body:focus {
     border-radius: 8px 8px 0 0;
 }
 
+/* The map itself fills its box (.minimap above sizes the box); the box clips it to the rounded corners */
+.minimap {
+    position: relative;
+    overflow: hidden;
+}
+
+.minimap-frame {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+}
+
+/* Our zoom field (remembered zoom), top right, clear of Google's place card in the top left */
+.minimap .minimap-zoom { /* extra specificity: antd sets its own width */
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 92px;
+}
+
+.minimap .minimap-zoom input {
+    padding-inline: 0;
+    text-align: center;
+}
+
 /* Location card's mini map shrinks/grows in height (grid rows 0fr <-> 1fr follow its real height), no fade */
 /* Extra specificity: antd styles every card cover child as display: block, which would cancel the grid */
 .location-card .ant-card-cover > .map-reveal {
@@ -412,7 +496,8 @@ body:focus {
 
 /* Collapsing (App.jsx): while the box shrinks into the logo, everything but the logo fades out */
 .panel-collapsing .panel-body > :not(.panel-header),
-.panel-collapsing .theme-button {
+.panel-collapsing .theme-button,
+.panel-collapsing .coords-button {
     opacity: 0;
     transition: opacity 0.15s ease;
 }

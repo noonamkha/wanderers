@@ -4,6 +4,7 @@ import {
     Button,
     Flex,
     Input,
+    InputNumber,
     Select,
     Switch,
     Typography,
@@ -36,7 +37,9 @@ import {
     PushpinOutlined,
     PushpinFilled,
     EyeTwoTone,
-    EyeInvisibleTwoTone
+    EyeInvisibleTwoTone,
+    EyeOutlined,
+    EyeInvisibleOutlined
 } from '@ant-design/icons';
 import { setOptions, importLibrary } from '@googlemaps/js-api-loader';
 import logo from './assets/nu-tetris.svg';
@@ -76,17 +79,57 @@ async function findPano(location, radius) {
     return data;
 }
 
+// Can the viewer show this panorama? A location search sometimes returns a removed / restricted user photo:
+// it has data, but asking for it by id fails and the viewer shows "no Street View available". So user
+// photos are checked by id (one extra request); Google's own imagery isn't checked
+async function isUsable(data) {
+    return isGoogleImagery(data) || Boolean(await checkPano(data.location.pano));
+}
+
+// Ring sizes (metres) to look around a removed photo, and the directions searched on each ring
+const RING_METERS = [3, 15, 60, 250, 1000, 4000, 15000, 50000];
+const RING_HEADINGS = [0, 60, 120, 180, 240, 300];
+
+// `data` = the nearest panorama to `location`, or if the viewer can't show it (a removed user photo), the
+// next nearest one that works, within `radius`. The search only ever returns the single nearest panorama,
+// so look around the removed one: search again from points on a small ring around it (another upload of
+// the same spot is often a metre away), then wider rings, and take the working one closest to `location`.
+// From any source, like the first search. Throws if there's none
+async function usableNear(data, location, radius) {
+    if (await isUsable(data)) return data;
+    const broken = new Set([data.location.pano]);
+    const center = data.location.latLng;
+    for (const ring of RING_METERS) {
+        if (ring > 2 * radius) break;
+        const found = await Promise.all(RING_HEADINGS.map((heading) =>
+            findPano(offsetPoint(center, ring, heading), 2 * ring).catch(() => null)));
+        const candidates = [...new Map(found
+            .filter((d) => d && !broken.has(d.location.pano) && distanceMeters(location, d.location.latLng) <= radius)
+            .map((d) => [d.location.pano, d])).values()];
+        const usable = await Promise.all(candidates.map(isUsable));
+        candidates.forEach((d, i) => !usable[i] && broken.add(d.location.pano));
+        const working = candidates.filter((d, i) => usable[i]);
+        if (working.length) {
+            return working.reduce((a, b) =>
+                distanceMeters(location, a.location.latLng) <= distanceMeters(location, b.location.latLng) ? a : b);
+        }
+    }
+    throw new Error('No usable Street View near here');
+}
+
 // Closest panorama to an exact spot (typed / pasted coordinates, links): small search first, widen only
 // if nothing is found, so a typical hit costs one request
 async function findNearestPano(location) {
-    for (const radius of [50, 1000]) {
+    for (const radius of [50, 1000, 50000]) {
+        let data;
         try {
-            return await findPano(location, radius);
+            data = await findPano(location, radius);
         } catch {
-            // nothing this close, widen the search
+            continue; // nothing this close, widen the search
         }
+        return usableNear(data, location, 50000);
     }
-    return findPano(location, 50000);
+    throw new Error('No Street View near here');
 }
 
 // Random point anywhere on earth
@@ -109,8 +152,12 @@ async function findRandomPano(areas) {
         const point = feature ? randomPointIn(feature) : randomPointOnEarth();
         if (!point) continue;
         try {
-            const data = await findPano(point, feature ? searchRadius(feature) : 50000); // one request per try
-            if (!feature || isInFeature(feature, data.location.latLng.toJSON())) return data;
+            const radius = feature ? searchRadius(feature) : 50000;
+            const nearest = await findPano(point, radius); // one request per try
+            if (feature && !isInFeature(feature, nearest.location.latLng.toJSON())) continue;
+            const data = await usableNear(nearest, point, radius); // a removed user photo: the next nearest
+            if (feature && !isInFeature(feature, data.location.latLng.toJSON())) continue;
+            return data;
         } catch {
             // no imagery here, try again
         }
@@ -130,13 +177,28 @@ function entryMonth(entry) {
     return date && `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 }
 
-// Distance in metres between two LatLngs (haversine)
+// Plain { lat, lng } from a LatLng or a literal
+const latLngOf = (p) => (typeof p.lat === 'function' ? p.toJSON() : p);
+
+// Distance in metres between two points, LatLngs or literals (haversine)
 function distanceMeters(a, b) {
+    const [p, q] = [latLngOf(a), latLngOf(b)];
     const rad = Math.PI / 180;
-    const dLat = (b.lat() - a.lat()) * rad;
-    const dLng = (b.lng() - a.lng()) * rad;
-    const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat() * rad) * Math.cos(b.lat() * rad) * Math.sin(dLng / 2) ** 2;
+    const dLat = (q.lat - p.lat) * rad;
+    const dLng = (q.lng - p.lng) * rad;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(p.lat * rad) * Math.cos(q.lat * rad) * Math.sin(dLng / 2) ** 2;
     return 2 * 6371000 * Math.asin(Math.sqrt(h));
+}
+
+// The point `meters` away from `from` in compass direction `heading` (degrees)
+function offsetPoint(from, meters, heading) {
+    const { lat, lng } = latLngOf(from);
+    const rad = Math.PI / 180;
+    const d = meters / 6371000;
+    const [phi, theta] = [lat * rad, heading * rad];
+    const phi2 = Math.asin(Math.sin(phi) * Math.cos(d) + Math.cos(phi) * Math.sin(d) * Math.cos(theta));
+    const dLng = Math.atan2(Math.sin(theta) * Math.sin(d) * Math.cos(phi), Math.cos(d) - Math.sin(phi) * Math.sin(phi2));
+    return { lat: phi2 / rad, lng: ((lng + dLng / rad + 540) % 360) - 180 };
 }
 
 // How close Google's imagery must be to the found panorama to count as the same spot
@@ -313,15 +375,37 @@ const EmbedStreetView = ({ apiKey, pano }) => {
     );
 }
 
-// Zoom of the mini map: ~1,100 km across at the desktop size, enough to see the surrounding region
-
+// Zoom of the mini map until the user picks their own with its zoom field (then remembered)
+const DEFAULT_MAP_ZOOM = 8;
+const MIN_MAP_ZOOM = 1;
+const MAX_MAP_ZOOM = 21;
 
 // Small map showing the current location: Maps Embed API place mode, free and unlimited.
-// Changing the position reloads the iframe
-const MiniMap = ({ apiKey, position, className, style }) => {
+// Changing the position reloads the iframe. Our own zoom field, because zooming inside the iframe can't be
+// read (it's another site's page), so it couldn't be remembered. A new zoom only applies from the next
+// location on: changing it doesn't reload the map
+const MiniMap = ({ apiKey, position, zoom, onZoom, className, style }) => {
+    // Zoom the current location was loaded with: only follows `zoom` when the position changes
+    const [shown, setShown] = useState({ position, zoom });
+    if (shown.position !== position) setShown({ position, zoom });
     if (!position) return null;
-    const params = new URLSearchParams({ key: apiKey, q: `${position.lat},${position.lng}`, zoom: 8 });
-    return <iframe src={`https://www.google.com/maps/embed/v1/place?${params}`} className={className} style={style} />;
+    const params = new URLSearchParams({ key: apiKey, q: `${position.lat},${position.lng}`, zoom: shown.zoom });
+    return (
+        <div className={className} style={style}>
+            <iframe src={`https://www.google.com/maps/embed/v1/place?${params}`} className="minimap-frame" />
+            <InputNumber
+                mode="spinner"
+                size="small"
+                min={MIN_MAP_ZOOM}
+                max={MAX_MAP_ZOOM}
+                precision={0}
+                value={zoom}
+                onChange={(value) => value != null && onZoom(value)}
+                aria-label="Map zoom for the next locations"
+                className="minimap-zoom"
+            />
+        </div>
+    );
 }
 
 const ANYWHERE = '🌍 Anywhere';
@@ -470,10 +554,12 @@ function searchLocations(entries, query) {
     return { results, total };
 }
 
-// Search over all locations (search index), shared by the desktop menu and the phone sheet.
-// onPickResult(fullPath, viaEnter) is called with the chosen result (viaEnter: picked with the Enter key). Returns the search box, the results view
-// (null while there's no query) and helpers
-function useLocationSearch(onPickResult) {
+// Search over all locations (search index), shared by the desktop menu, the phone sheet and the panel's search
+// field. onPickResult(fullPath, viaEnter) is called with the chosen result (viaEnter: picked with the Enter key).
+// inputProps: extra props for the search box; clearOnBlur: clear the search when the box loses focus;
+// blurOnPick: leave the box after a pick (so Space goes to the shortcuts again). Returns the search box, the results view (null while there's no
+// query) and helpers
+function useLocationSearch(onPickResult, { clearOnBlur = false, blurOnPick = false, ...inputProps } = {}) {
     const [query, setQuery] = useState('');
     const [entries, setEntries] = useState(searchEntries); // all searchable locations, once loaded
     const [active, setActive] = useState(0); // highlighted result (arrow keys / Enter)
@@ -486,6 +572,7 @@ function useLocationSearch(onPickResult) {
     };
     const pickResult = (path, viaEnter = false) => {
         setQuery('');
+        if (blurOnPick) inputRef.current?.blur();
         onPickResult(path, viaEnter);
     };
 
@@ -499,8 +586,13 @@ function useLocationSearch(onPickResult) {
         return q && entries && fold(q).length >= 2 ? searchLocations(entries, q) : null;
     }, [entries, deferredQuery]);
 
-    // ↑ / ↓ move the highlight through the results (keeping it in view), Enter picks the highlighted one
+    // ↑ / ↓ move the highlight through the results (keeping it in view), Enter picks the highlighted one,
+    // Escape clears the search
     function handleKey(e) {
+        if (e.key === 'Escape' && query) {
+            setQuery('');
+            return;
+        }
         const count = search?.results.length ?? 0;
         if (!count) return;
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -525,6 +617,9 @@ function useLocationSearch(onPickResult) {
                 setActive(0);
             }}
             onKeyDown={handleKey}
+            onFocus={loadEntries}
+            onBlur={clearOnBlur ? () => setQuery('') : undefined}
+            {...inputProps}
         />
     );
     const searchView = !query.trim() ? null : !entries ? (
@@ -555,34 +650,28 @@ function useLocationSearch(onPickResult) {
         </div>
     );
 
-    return { searchBox, searchView, setQuery, loadEntries, focus: () => inputRef.current?.focus() };
+    return {
+        searchBox, searchView, query, setQuery, loadEntries,
+        focus: () => inputRef.current?.focus(),
+        blur: () => inputRef.current?.blur(),
+    };
 }
 
 // Desktop: one breadcrumb location. Click it to open a cascader (clicking an option picks it and opens the
 // next level; it stays open so you can keep adjusting) with a search box that gets focus right away.
 // options: the choices at this location's level; prefix: path above them
-// openSignal: a number that changes when the S key is pressed; the menu with isSearchTarget (the last
-// breadcrumb location) then opens with the search focused
-const AreaMenu = ({ title, options, prefix, value, onPick, onLoad, openSignal, isSearchTarget }) => {
+const AreaMenu = ({ title, options, prefix, value, onPick, onLoad }) => {
     const [open, setOpen] = useState(false);
     // A search result picked with Enter is a final choice: close the menu (clicks keep it open for adjusting)
-    const { searchBox, searchView, setQuery, loadEntries, focus } = useLocationSearch((path, viaEnter) => {
+    const { searchBox, searchView, setQuery, loadEntries, focus, blur } = useLocationSearch((path, viaEnter) => {
         onPick(path);
         if (viaEnter) setOpen(false);
     });
 
-    // S key: open (adjusting state during render when the signal changes), then focus the search box
-    const [seenSignal, setSeenSignal] = useState(openSignal);
-    if (openSignal !== seenSignal) {
-        setSeenSignal(openSignal);
-        if (isSearchTarget) setOpen(true);
-    }
+    // Closed (any way): the hidden search box shouldn't keep the focus, so typing and shortcuts work again
     useEffect(() => {
-        if (!openSignal || !isSearchTarget) return;
-        loadEntries();
-        const timer = setTimeout(focus, 50);
-        return () => clearTimeout(timer);
-    }, [openSignal]); // eslint-disable-line react-hooks/exhaustive-deps
+        if (!open) blur();
+    }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleOpenChange = (next) => {
         setOpen(next);
@@ -614,8 +703,15 @@ const AreaMenu = ({ title, options, prefix, value, onPick, onLoad, openSignal, i
                     value={value}
                     expandTrigger="click" // clicking an option picks it and opens its children
                     changeOnSelect // any level can be picked
-                    // Clicking the selected option again deselects it (goes up one level)
-                    onChange={(path) => path?.length && pick(sameArray(path, value) ? path.slice(0, -1) : path)}
+                    // Clicking the selected option again deselects it (goes up one level). Picking an area with
+                    // no smaller areas inside is a final choice: close the menu
+                    onChange={(path, selectedOptions) => {
+                        if (!path?.length) return;
+                        if (sameArray(path, value)) return pick(path.slice(0, -1));
+                        pick(path);
+                        const picked = selectedOptions.at(-1);
+                        if (!(picked.children?.length > 0 || picked.isLeaf === false)) setOpen(false);
+                    }}
                     loadData={(selectedOptions) => onLoad(selectedOptions.at(-1).value)}
                 />
             )}
@@ -786,8 +882,7 @@ const LocationSheet = ({ sheet, setSheet, options, current, onPick, onLoad, onMi
 // × clears the selection
 // Phone: each location opens the shared LocationSheet at its level instead (sheet / setSheet from Wanderer,
 // so a swipe up on the panel can open it too)
-// searchSignal: changes when the S key is pressed; the deepest location's menu opens with search focused
-const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setSheet, onMinimize, searchSignal }) => {
+const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setSheet, onMinimize }) => {
     const country = COUNTRIES[selected];
     const [loaded, setLoaded] = useState({}); // country code -> its areas (levels 1-3) as options
 
@@ -830,8 +925,6 @@ const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setShe
     const continentKey = country ? `continent:${country.continent}` : selected;
     const fullPath = !selected ? [] : country ? [continentKey, country.code, ...subArea] : [selected];
     // A location: desktop cascader menu, or (phone) a link opening the sheet at that level
-    // Level of the last breadcrumb location (prefix length of its menu), which the S key opens
-    const lastLevel = !country ? 0 : !subArea[0] ? 1 : !subArea[1] ? 2 : !subArea[2] ? 3 : 4;
     const menu = (title, options, prefix) => isPhone
         ? <a onClick={() => setSheet({ open: true, stack: prefix, direction: 'none' })}>{title}</a>
         : (
@@ -842,8 +935,6 @@ const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setShe
                 value={fullPath.slice(prefix.length)}
                 onPick={onPick}
                 onLoad={load}
-                openSignal={searchSignal}
-                isSearchTarget={prefix.length === lastLevel}
             />
         );
     const continentsMenu = (title) => menu(title, continentOptions, []);
@@ -868,9 +959,11 @@ const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setShe
                     items.push({ title: province ? menu(districtName, province.children, [continentKey, country.code, subArea[0]]) : districtName });
                     if (subArea[2]) {
                         const wardName = district?.children?.find((w) => w.value === subArea[2])?.label ?? AREA_SHORT_NAMES.get(subArea[2]) ?? '…';
-                        items.push({ title: district?.children
-                            ? menu(wardName, district.children, [continentKey, country.code, subArea[0], subArea[1]])
-                            : wardName });
+                        items.push({
+                            title: district?.children
+                                ? menu(wardName, district.children, [continentKey, country.code, subArea[0], subArea[1]])
+                                : wardName
+                        });
                     }
                 }
             }
@@ -960,6 +1053,10 @@ const Wanderer = () => {
     const [selected, setSelected] = useState(savedSelection.selected); // tree key: a continent or a country
     const [subArea, setSubArea] = useState(savedSelection.subArea); // cascader path inside the selected country
     const [showMap, setShowMap] = useState(() => loadSetting('showMap') !== 'false'); // desktop mini map
+    const [mapZoom, setMapZoom] = useState(() => {
+        const saved = Number(loadSetting('mapZoom'));
+        return saved >= MIN_MAP_ZOOM && saved <= MAX_MAP_ZOOM ? saved : DEFAULT_MAP_ZOOM;
+    });
     // Panel collapsed to just the logo + country (toggled by clicking the logo), remembered in this browser
     const [panelCollapsed, setPanelCollapsed] = useState(() => loadSetting('panelCollapsed') === 'true');
     const panelRef = useRef(null);
@@ -979,6 +1076,9 @@ const Wanderer = () => {
     const [panelWidth, setPanelWidth] = useState(() => Number(loadSetting('panelWidth')) || PANEL_MIN_WIDTH); // desktop
     const [loading, setLoading] = useState(false);
     const [coordsInput, setCoordsInput] = useState('');
+    // Panel mode, switched with the header button: random (location search + Go = random place) or go to (coordinates + Go)
+    const [goMode, setGoMode] = useState(false);
+    const coordsRef = useRef(null);
     const isPhone = useIsPhone();
     // Phone bottom sheet levels, changed by swiping: 0 = minimized (country, date, random button),
     // 1 = normal (everything, including the area breadcrumb); swiping above 1 opens the location picker sheet
@@ -989,9 +1089,7 @@ const Wanderer = () => {
     const minimized = isPhone && sheetLevel === 0;
     // Phone location picker sheet: { open, stack (path of the list shown), direction (slide) }
     const [locationSheet, setLocationSheet] = useState({ open: false, stack: [], direction: 'none' });
-    const [searchSignal, setSearchSignal] = useState(0); // desktop: bumped by the S key to open the location search
     const showCountries = !minimized;
-    let antdTheme = theme.useToken()
     function handleTouchStart(e) {
         // Not swipes inside the location sheet / menus (they're portals, their touches bubble here too)
         touchStartY.current = e.target.closest('.ant-drawer, .ant-popover') ? null : e.touches[0].clientY;
@@ -1096,11 +1194,17 @@ const Wanderer = () => {
         if (!ready) return;
         // Open the coordinates from the URL, or a random place if there are none
         const start = startFromUrl();
+        const random = () => findRandomPano([]).then((data) => show(data));
         const found = start
-            ? findNearestPano(start).then(show)
-            : findRandomPano([]).then((data) => show(data));
+            ? findNearestPano(start).then(show).catch((e) => {
+                // Nothing viewable near the link's coordinates: say so and show a random place instead
+                console.error(e);
+                messageApi.warning('No Street View available near these coordinates, showing a random place');
+                return random();
+            })
+            : random();
         found.catch(console.error);
-    }, [ready])
+    }, [ready, messageApi])
 
     // Remember the area selection across reloads
     useEffect(() => {
@@ -1157,6 +1261,12 @@ const Wanderer = () => {
         saveSetting('showMap', String(show));
     }
 
+    // Mini map zoom from its zoom field, used from the next location on and kept for later visits
+    function changeMapZoom(zoom) {
+        setMapZoom(zoom);
+        saveSetting('mapZoom', String(zoom));
+    }
+
     // Current selection as a full path: [continent, country, level 1, level 2, level 3] ([] = anywhere)
     function selectionPath() {
         if (!selected) return [];
@@ -1169,7 +1279,25 @@ const Wanderer = () => {
         setSubArea(path.slice(2));
     }
 
-    // The field holds something other than the current location's coordinates (edited or pasted); empty = random
+    // Panel search field (next to the random mode's Go): search all locations, a pick selects that area like the location menus.
+    // Desktop: results in a dropdown below the field. Phone: the field opens the location sheet with its search
+    const panelSearch = useLocationSearch(handlePickPath, isPhone ? {
+        readOnly: true,
+        placeholder: 'Search locations',
+        onClick: () => setLocationSheet({ open: true, stack: selectionPath().slice(0, -1), direction: 'none', focusSearch: true }),
+    } : {
+        placeholder: 'Search locations',
+        clearOnBlur: true, // clicking a result keeps the focus (see the results' onMouseDown)
+        blurOnPick: true, // then Space goes to a random place in the picked area
+    });
+
+    function toggleMode() {
+        const go = !goMode;
+        setGoMode(go);
+        if (go) setTimeout(() => coordsRef.current?.focus(), 50); // focus selects it, so pasting replaces it
+    }
+
+    // The coordinates field holds something other than the current location's coordinates (edited or pasted)
     const typed = coordsInput.trim();
     const goTo = typed !== '' && typed !== (position ? `${position.lat}, ${position.lng}` : '');
 
@@ -1255,8 +1383,9 @@ const Wanderer = () => {
 
     // Collapse: shrink the box from the full panel to the collapsed size (worked out from the logo button, the
     // panel's padding and a line for the country) while everything but the logo fades out (.panel-collapsing).
-    // The logo stays put at the top left, so it looks like the panel folds into it. At the end, switch to the
-    // collapsed content. On the phone the card also moves 10 px in from the screen's left / bottom edges
+    // The logo stays at the panel's top left, so it looks like the panel folds into it. At the end, switch to the
+    // collapsed content. On the phone the card also moves 10 px in from the screen's left / bottom edges; on
+    // desktop it moves up to the top of the column, where the location card above it was (that one fades out)
     useLayoutEffect(() => {
         if (!collapsing) return;
         const panel = panelRef.current;
@@ -1272,7 +1401,9 @@ const Wanderer = () => {
         const width = logoBox.width + px(getComputedStyle(logoButtonEl).marginLeft)
             + px(body.paddingLeft) + px(body.paddingRight) + borders;
         const height = aboveLogo + logoBox.height + 2 + (px(body.lineHeight) || 22) + px(body.paddingBottom) + borders;
-        const move = isPhone ? 'translate(10px, -10px)' : 'none';
+        const move = isPhone
+            ? 'translate(10px, -10px)'
+            : `translateY(${panel.parentElement.getBoundingClientRect().top - before.top}px)`;
         panel.style.overflow = 'hidden';
         unpinContent.current = pinContentWidth(panel);
         const animation = panel.animate([
@@ -1323,8 +1454,8 @@ const Wanderer = () => {
     }, [panelCollapsed]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Keyboard shortcuts, unless typing in a field (or a button / link has focus, where Space already clicks it):
-    // Space = the Random / Go button; S = location search (desktop: the menu of the last breadcrumb location;
-    // phone: the location sheet), with the search box focused
+    // Space = the mode's button (random place, or the coordinates when they're new); S = location search (desktop: the panel's search field, restoring a collapsed
+    // panel first; phone: the location sheet), with the search box focused
     useEffect(() => {
         const onKeyDown = (e) => {
             if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1333,12 +1464,17 @@ const Wanderer = () => {
             e.preventDefault(); // also keeps the "s" out of the search box that's about to get focus
             if (e.code === 'KeyS') {
                 if (isPhone) setLocationSheet({ open: true, stack: selectionPath().slice(0, -1), direction: 'none', focusSearch: true });
-                else setSearchSignal((n) => n + 1);
+                else {
+                    if (panelCollapsed) togglePanelCollapsed();
+                    setGoMode(false); // the search is in random mode
+                    setTimeout(panelSearch.focus, 50); // once a restored panel has its field again
+                }
                 return;
             }
             if (loading) return;
-            if (goTo) handleGoTo();
-            else handleRandom();
+            if (goMode && !minimized) {
+                if (goTo) handleGoTo();
+            } else handleRandom();
         };
         window.addEventListener('keydown', onKeyDown);
         return () => window.removeEventListener('keydown', onKeyDown);
@@ -1381,165 +1517,240 @@ const Wanderer = () => {
 
     if (!API_KEY) return <p>Missing VITE_GOOGLE_MAPS_API_KEY. Add it to .env.local and restart the dev server.</p>;
     if (!ready) return null;
-    return (
-        <>
-            {messageContext}
-            <EmbedStreetView apiKey={API_KEY} pano={current?.pano} />
-            {/* On phones the mini map floats in the top right, outside the bottom panel */}
-            {isPhone && <MiniMap apiKey={API_KEY} position={position} className="minimap minimap-floating" />}
-            {/* Card body is a flex column (see .panel-body) so only the country list scrolls */}
-            <Card
-                ref={panelRef}
-                className={`panel${panelCollapsed ? ' panel-collapsed' : ''}${collapsing ? ' panel-collapsing' : ''}`}
-                classNames={{ body: 'panel-body' }}
-                style={isPhone || panelCollapsed ? undefined : { width: panelWidth }}
-                onTouchStart={isPhone && !panelCollapsed ? handleTouchStart : undefined}
-                onTouchEnd={isPhone && !panelCollapsed ? handleTouchEnd : undefined}
-                onTouchCancel={() => { touchStartY.current = null; }}
-            >
-                {panelCollapsed ? (
-                    // Collapsed: just the logo and the country below it, cut with "…" at the logo's width
-                    // (align start: the logo button keeps its own width, so the logo doesn't move)
-                    <Flex vertical gap={2} align="start">
-                        {/* Phone: the sheet's drag handle here too (tap = show the panel), so the logo sits where it
-                            does in the full sheet and doesn't jump when collapsing / restoring */}
-                        {isPhone && <div className="sheet-handle sheet-handle-collapsed" onClick={togglePanelCollapsed} />}
-                        {logoButton}
-                        <Typography.Text strong ellipsis={{ tooltip: country?.name }} className="collapsed-country">
-                            <CountryFlag country={country} busy={countryBusy} />
-                            {country === undefined ? '…' : country?.name || 'Unknown country'}
-                        </Typography.Text>
+
+    // Desktop: mini map + location info, a card of its own above the panel
+    const locationCard = (
+        <Card
+            hoverable
+            styles={{
+                body: {
+                    padding: 12
+                }
+            }}
+            size="small"
+            className="location-card"
+            cover={
+                // Stays mounted and slides open/closed (see .map-reveal), so toggling doesn't reload the map
+                <div className={`map-reveal${showMap ? '' : ' collapsed'}`}>
+                    <div className="map-reveal-inner" ref={mapBoxRef}>
+                        <MiniMap
+                            apiKey={API_KEY}
+                            position={position}
+                            zoom={mapZoom}
+                            onZoom={changeMapZoom}
+                            className="minimap"
+                            // Pinned: fixed height, width still follows the panel (no longer square)
+                            style={pinnedMapSize ? { height: pinnedMapSize, aspectRatio: 'auto' } : undefined}
+                        />
+                    </div>
+                </div>
+            }
+        >
+            {/* Draggable right edge, like the panel's: resizes both cards (they share one width) */}
+            <div className="panel-resize" onPointerDown={handleResizeStart} />
+            <LocationInfo
+                data={currentData}
+                country={country}
+                busy={countryBusy}
+                dates={dates}
+                current={current}
+                onDateChange={handleDateChange}
+                // Hide the mini map to leave more room for the country list
+                countryExtra={
+                    <Flex align="center" gap={4}>
+                        {/* <Button
+                            shape='circle'
+                            type="text"
+                            size="small"
+                            icon={pinnedMapSize ? <PushpinFilled /> : <PushpinOutlined />}
+                            onClick={togglePinMap}
+                            disabled={!showMap}
+                            title={pinnedMapSize ? 'Unpin map height' : 'Pin map height'}
+                        /> */}
+
+                        <Button
+                            shape='circle'
+                            type="text"
+                            size="large"
+                            className="coords-button"
+                            icon={pinnedMapSize ? <PushpinFilled /> : <PushpinOutlined />}
+                            onClick={togglePinMap}
+                            disabled={!showMap}
+                            title={pinnedMapSize ? 'Unpin map height' : 'Pin map height'}
+                        />
+                        <Button
+                            shape='circle'
+                            type="text"
+                            size="large"
+                            className="theme-button"
+                            icon={showMap ? <EyeOutlined /> : <EyeInvisibleOutlined />}
+                            onClick={(e) => toggleMap(!showMap)}
+                            // disabled={!showMap}
+                            title={showMap ? 'Hide map' : 'Show map'}
+                        />
                     </Flex>
-                ) : (<>
-                    {/* Desktop: draggable right edge to resize the panel */}
-                    {!isPhone && <div className="panel-resize" onPointerDown={handleResizeStart} />}
-                    {/* Phone: drag handle, also tappable */}
-                    {isPhone && <div className="sheet-handle" onClick={() => setSheetLevel(sheetLevel === 1 ? 0 : 1)} />}
-                    {/* Logo and theme switch, hidden (sliding) when the phone sheet is minimized */}
-                    <div className={`sheet-section panel-header${minimized ? ' collapsed' : ''}`}>
-                        <div className="sheet-section-inner">
-                            <Flex align="center" justify="space-between" gap={8}>
-                                {logoButton}
+                }
+            />
+        </Card>
+    );
+
+    // Card body is a flex column (see .panel-body)
+    const panel = (
+        <Card
+            ref={panelRef}
+            className={`panel${panelCollapsed ? ' panel-collapsed' : ''}${collapsing ? ' panel-collapsing' : ''}`}
+            classNames={{ body: 'panel-body' }}
+            onTouchStart={isPhone && !panelCollapsed ? handleTouchStart : undefined}
+            onTouchEnd={isPhone && !panelCollapsed ? handleTouchEnd : undefined}
+            onTouchCancel={() => { touchStartY.current = null; }}
+        >
+            {panelCollapsed ? (
+                // Collapsed: just the logo and the country below it, cut with "…" at the logo's width
+                // (align start: the logo button keeps its own width, so the logo doesn't move)
+                <Flex vertical gap={2} align="start">
+                    {/* Phone: the sheet's drag handle here too (tap = show the panel), so the logo sits where it
+                        does in the full sheet and doesn't jump when collapsing / restoring */}
+                    {isPhone && <div className="sheet-handle sheet-handle-collapsed" onClick={togglePanelCollapsed} />}
+                    {logoButton}
+                    <Typography.Text strong ellipsis={{ tooltip: country?.name }} className="collapsed-country">
+                        <CountryFlag country={country} busy={countryBusy} />
+                        {country === undefined ? '…' : country?.name || 'Unknown country'}
+                    </Typography.Text>
+                </Flex>
+            ) : (<>
+                {/* Desktop: draggable right edge to resize the panel */}
+                {!isPhone && <div className="panel-resize" onPointerDown={handleResizeStart} />}
+                {/* Phone: drag handle, also tappable */}
+                {isPhone && <div className="sheet-handle" onClick={() => setSheetLevel(sheetLevel === 1 ? 0 : 1)} />}
+                {/* Logo and theme switch, hidden (sliding) when the phone sheet is minimized */}
+                <div className={`sheet-section panel-header${minimized ? ' collapsed' : ''}`}>
+                    <div className="sheet-section-inner">
+                        <Flex align="center" justify="space-between" gap={8}>
+                            {logoButton}
+                            <Flex align="center" gap={4}>
+                                <Button
+                                    shape="circle"
+                                    type="text"
+                                    size="large"
+                                    className="coords-button"
+                                    icon={goMode ? <AimOutlined /> : <CompassOutlined />}
+                                    onClick={toggleMode}
+                                    title={goMode ? 'Go to mode (switch to random)' : 'Random mode (switch to go to coordinates)'}
+                                />
                                 <ThemeSwitch />
                             </Flex>
-                        </div>
+                        </Flex>
                     </div>
-                    {/* Both views stay rendered so switching between minimized and normal can slide (see .sheet-section) */}
-                    <div className={`sheet-section${minimized ? '' : ' collapsed'}`}>
-                        <div className="sheet-section-inner">
-                            <LocationInfo data={currentData} country={country} busy={countryBusy} dates={dates} current={current} onDateChange={handleDateChange} compact />
-                        </div>
+                </div>
+                {/* Both views stay rendered so switching between minimized and normal can slide (see .sheet-section) */}
+                <div className={`sheet-section${minimized ? '' : ' collapsed'}`}>
+                    <div className="sheet-section-inner">
+                        <LocationInfo data={currentData} country={country} busy={countryBusy} dates={dates} current={current} onDateChange={handleDateChange} compact />
                     </div>
+                </div>
+                {/* Phone: the location info in the sheet (desktop: its own card below the panel) */}
+                {isPhone && (
                     <div className={`sheet-section${minimized ? ' collapsed' : ''}`}>
                         <div className="sheet-section-inner">
-                            {isPhone ? (
-                                <LocationInfo data={currentData} country={country} busy={countryBusy} dates={dates} current={current} onDateChange={handleDateChange} />
-                            ) : (
-                                // Desktop: mini map as the card's cover image, location info as its content
-                                <Card
-                                    hoverable
-                                    style={{
-                                        boxShadow: antdTheme.token.boxShadow
-                                    }}
-                                    styles={{
-                                        body: {
-                                            padding: 8
-                                        }
-                                    }}
-                                    size="small"
-                                    className="location-card"
-                                    cover={
-                                        // Stays mounted and slides open/closed (see .map-reveal), so toggling doesn't reload the map
-                                        <div className={`map-reveal${showMap ? '' : ' collapsed'}`}>
-                                            <div className="map-reveal-inner" ref={mapBoxRef}>
-                                                <MiniMap
-                                                    apiKey={API_KEY}
-                                                    position={position}
-                                                    className="minimap"
-                                                    // Pinned: fixed height, width still follows the panel (no longer square)
-                                                    style={pinnedMapSize ? { height: pinnedMapSize, aspectRatio: 'auto' } : undefined}
-                                                />
-                                            </div>
-                                        </div>
-                                    }
-                                >
-                                    <LocationInfo
-                                        data={currentData}
-                                        country={country}
-                                        busy={countryBusy}
-                                        dates={dates}
-                                        current={current}
-                                        onDateChange={handleDateChange}
-                                        // Hide the mini map to leave more room for the country list
-                                        countryExtra={
-                                            <Flex align="center" gap={2}>
-                                                <Button
-                                                    shape='circle'
-                                                    type="text"
-                                                    size="small"
-                                                    icon={pinnedMapSize ? <PushpinFilled /> : <PushpinOutlined />}
-                                                    onClick={togglePinMap}
-                                                    disabled={!showMap}
-                                                    title={pinnedMapSize ? 'Unpin map height' : 'Pin map height'}
-                                                />
-                                                <Button
-                                                    shape='circle'
-                                                    type="text"
-                                                    size="small"
-                                                    icon={showMap ? <EyeTwoTone twoToneColor={green.primary} /> : <EyeInvisibleTwoTone />}
-                                                    onClick={(e) => toggleMap(!showMap)}
-                                                    // disabled={!showMap}
-                                                    title={showMap ? 'Hide map' : 'Show map'}
-                                                />
-                                            </Flex>
-                                        }
-                                    />
-                                </Card>
-                            )}
+                            <LocationInfo data={currentData} country={country} busy={countryBusy} dates={dates} current={current} onDateChange={handleDateChange} />
                         </div>
                     </div>
-                    {/* Coordinates field + one button: "Go" when the field has other coordinates than the current
-                        location, otherwise "Random". The field is hidden in the minimized phone sheet */}
-                    {/* Field takes the remaining width, the button keeps its own width, so resizing the panel only
-                        stretches the field. Minimized phone sheet: no field, the button fills the row */}
-                    <Flex gap={8}>
-                        {!minimized && (
+                )}
+                {/* Go to mode: coordinates field + Go. The two modes' rows slide into each other's place */}
+                <div className={`sheet-section${goMode && !minimized ? '' : ' collapsed'}`}>
+                    <div className="sheet-section-inner">
+                        <Space.Compact block>
                             <Input
+                                ref={coordsRef}
                                 value={coordsInput}
                                 onChange={(e) => setCoordsInput(e.target.value)}
                                 onFocus={(e) => e.target.select()} // so pasting replaces the old coordinates
                                 onPressEnter={handleGoTo}
                                 placeholder="lat, lng"
                                 disabled={loading}
-                                style={{ flex: 1, minWidth: 0 }}
                             />
-                        )}
-                        <Button
-                            color={goTo ? "green" : "primary"}
-                            variant="solid"
-                            icon={goTo ? <AimOutlined /> : <CompassOutlined />}
-                            onClick={goTo ? handleGoTo : handleRandom}
-                            loading={loading}
-                            style={minimized ? { flex: 1 } : { flexShrink: 0, width: 88 }}
-                        >
-                            {goTo ? 'Go' : 'Rand'}
-                        </Button>
-                    </Flex>
-                    {/* Area selection; on phones it slides away when the sheet is minimized (see .sheet-extra) */}
-                    <div className={`sheet-extra${showCountries ? ' open' : ''}`}>
-                        <SelectionBreadcrumb
-                            selected={selected}
-                            subArea={subArea}
-                            onPick={handlePickPath}
-                            isPhone={isPhone}
-                            sheet={locationSheet}
-                            setSheet={setLocationSheet}
-                            onMinimize={() => setSheetLevel(0)}
-                            searchSignal={searchSignal}
-                        />
+                            <Button
+                                color="green"
+                                variant="solid"
+                                onClick={handleGoTo}
+                                disabled={!goTo || loading}
+                                className="action-button"
+                            >
+                                Go
+                            </Button>
+                        </Space.Compact>
                     </div>
-                </>)}
-            </Card>
+                </div>
+                {/* Random mode: location search + Go (random place) in one control. The field takes the remaining width, the button
+                    keeps its own, so resizing the panel only stretches the field. Minimized phone sheet: just the
+                    button, in either mode */}
+                <div className={`sheet-section${goMode && !minimized ? ' collapsed' : ''}`}>
+                    <div className="sheet-section-inner">
+                        <Popover
+                            open={!isPhone && Boolean(panelSearch.searchView)}
+                            content={
+                                // Keep the focus in the field when clicking a result (its blur would clear the search)
+                                <div onMouseDown={(e) => e.preventDefault()} style={{ width: panelWidth - 24 }}>
+                                    {panelSearch.searchView}
+                                </div>
+                            }
+                            placement="bottomLeft"
+                            arrow={false}
+                        >
+                            <div>
+                                <Space.Compact block>
+                                    {!minimized && panelSearch.searchBox}
+                                    <Button
+                                        type="primary"
+                                        onClick={handleRandom}
+                                        loading={loading}
+                                        className="action-button"
+                                        style={minimized ? { flex: 1 } : undefined}
+                                    >
+                                        Go
+                                    </Button>
+                                </Space.Compact>
+                            </div>
+                        </Popover>
+                    </div>
+                </div>
+                {/* Area selection; on phones it slides away when the sheet is minimized (see .sheet-extra) */}
+                <div className={`sheet-extra${showCountries ? ' open' : ''}`}>
+                    <SelectionBreadcrumb
+                        selected={selected}
+                        subArea={subArea}
+                        onPick={handlePickPath}
+                        isPhone={isPhone}
+                        sheet={locationSheet}
+                        setSheet={setLocationSheet}
+                        onMinimize={() => setSheetLevel(0)}
+                    />
+                </div>
+            </>)}
+        </Card>
+    );
+
+    return (
+        <>
+            {messageContext}
+            <EmbedStreetView apiKey={API_KEY} pano={current?.pano} />
+            {/* On phones the mini map floats in the top right, outside the bottom panel */}
+            {isPhone && (
+                <MiniMap apiKey={API_KEY} position={position} zoom={mapZoom} onZoom={changeMapZoom}
+                    className="minimap minimap-floating" />
+            )}
+            {isPhone ? panel : (
+                // Desktop: the location card (mini map as its cover image, location info as its content) and,
+                // below it, the panel, sharing one width. The location card fades out while the panel folds and
+                // moves up into its place
+                <div
+                    className={`panel-stack${collapsing ? ' panel-stack-collapsing' : ''}`}
+                    style={panelCollapsed ? undefined : { width: panelWidth }}
+                >
+                    {!panelCollapsed && locationCard}
+                    {panel}
+                </div>
+            )}
         </>
     );
 }
