@@ -364,9 +364,13 @@ const EmbedStreetView = ({ apiKey, pano }) => {
     if (!pano) return null;
     // fov: horizontal field of view, 10-100°; the widest (100) instead of the default 90
     const params = new URLSearchParams({ key: apiKey, pano, fov: 100 });
+    const src = `https://www.google.com/maps/embed/v1/streetview?${params}`;
     return (
         <iframe
-            src={`https://www.google.com/maps/embed/v1/streetview?${params}`}
+            // A new iframe per panorama (key) instead of changing src: changing an iframe's src adds a browser
+            // history entry, so Back would step through the iframe instead of the app's locations
+            key={src}
+            src={src}
             className="viewer"
             allowFullScreen
             // Motion sensors for looking around by moving the phone (also stops the permissions policy warning)
@@ -392,7 +396,8 @@ const MiniMap = ({ apiKey, position, zoom, onZoom, className, style }) => {
     const params = new URLSearchParams({ key: apiKey, q: `${position.lat},${position.lng}`, zoom: shown.zoom });
     return (
         <div className={className} style={style}>
-            <iframe src={`https://www.google.com/maps/embed/v1/place?${params}`} className="minimap-frame" />
+            {/* New iframe per location (key): changing src would add a browser history entry (see EmbedStreetView) */}
+            <iframe key={params.toString()} src={`https://www.google.com/maps/embed/v1/place?${params}`} className="minimap-frame" />
             <InputNumber
                 mode="spinner"
                 size="small"
@@ -1129,7 +1134,9 @@ const Wanderer = () => {
 
     // Show a found panorama, at its newest capture date that can be shown. The embed can't report its
     // position, so take it from the lookup
-    async function show(data) {
+    // history: 'push' = a new browser history entry (Back returns to the previous location), 'replace' = update
+    // the current one (the first location, or one reached with Back / Forward)
+    async function show(data, history = 'push') {
         // Newest date first; only panoramas that weren't just returned get checked (usually none or one request)
         let { dates: list, known } = await panoDates(data).catch((e) => {
             console.error(e);
@@ -1148,6 +1155,12 @@ const Wanderer = () => {
         setVerifiedPanos(verified);
         setDates(list);
         const { lat, lng } = data.location.latLng.toJSON();
+        // URL in the same format as coordinates copied from Google Maps, e.g. ?10.76540664907444,106.66174253789497;
+        // the entry also keeps the panorama id, so Back / Forward reopen exactly this panorama
+        const url = `?${lat},${lng}`;
+        const entry = { pano: data.location.pano };
+        if (history === 'push' && window.location.search !== url) window.history.pushState(entry, '', url);
+        else window.history.replaceState(entry, '', url);
         setPosition({ lat, lng });
         setCoordsInput(`${lat}, ${lng}`); // same format as copied from Google Maps
         setPanoData(data);
@@ -1194,9 +1207,9 @@ const Wanderer = () => {
         if (!ready) return;
         // Open the coordinates from the URL, or a random place if there are none
         const start = startFromUrl();
-        const random = () => findRandomPano([]).then((data) => show(data));
+        const random = () => findRandomPano([]).then((data) => show(data, 'replace'));
         const found = start
-            ? findNearestPano(start).then(show).catch((e) => {
+            ? findNearestPano(start).then((data) => show(data, 'replace')).catch((e) => {
                 // Nothing viewable near the link's coordinates: say so and show a random place instead
                 console.error(e);
                 messageApi.warning('No Street View available near these coordinates, showing a random place');
@@ -1220,12 +1233,26 @@ const Wanderer = () => {
         }
     }, [savedSelection])
 
-    // Keep the URL in sync with the current location
+    // Browser Back / Forward: reopen that entry's panorama (by id, one request), or if it has none or it's gone,
+    // the nearest one to the URL's coordinates
     useEffect(() => {
-        if (!position) return;
-        // Same format as coordinates copied from Google Maps, e.g. ?10.76540664907444,106.66174253789497
-        window.history.replaceState(null, '', `?${position.lat},${position.lng}`);
-    }, [position])
+        if (!ready) return;
+        const onPopState = async (e) => {
+            setLoading(true);
+            try {
+                const byId = e.state?.pano && await checkPano(e.state.pano);
+                const coords = startFromUrl();
+                const data = byId || (coords && await findNearestPano(coords));
+                if (data) await show(data, 'replace');
+            } catch (err) {
+                console.error(err);
+                messageApi.error('Could not open that location again');
+            }
+            setLoading(false);
+        };
+        window.addEventListener('popstate', onPopState);
+        return () => window.removeEventListener('popstate', onPopState);
+    }, [ready, messageApi]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Desktop: drag the panel's right edge to resize it. Pointer capture keeps the drag going over the iframes
     function handleResizeStart(e) {
