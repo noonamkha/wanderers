@@ -3,8 +3,21 @@
     src: url('./assets/fonts/NotoSans-VariableFont_wdth,wght.ttf');
 }
 
+/* Noto Color Emoji, cut down to the emoji the app uses: every country flag (regional indicator letters) and the
+   continent emoji (~720 KB instead of 25 MB). Only its COLRv1 color glyphs are kept, so tech() makes browsers
+   that can't draw them (e.g. Safari) skip the download and use their own emoji. Made from the full font with:
+   pyftsubset NotoColorEmoji-Regular.ttf --unicodes="U+1F1E6-1F1FF,U+1F30D,U+1F30F,U+1F310,U+1F3D4,U+1F3F0,
+     U+1F427,U+1F483,U+1F998,U+1FA87" --layout-features='*' --drop-tables+=SVG --flavor=woff2
+     --output-file=NotoColorEmoji-subset.woff2   (fonttools, with lxml and brotli) */
+@font-face {
+    font-family: 'Noto Color Emoji';
+    src: url('./assets/fonts/NotoColorEmoji-subset.woff2') format('woff2') tech(color-COLRv1);
+    unicode-range: U+1F1E6-1F1FF, U+1F30D, U+1F30F, U+1F310, U+1F3D4, U+1F3F0, U+1F427, U+1F483, U+1F998, U+1FA87;
+    font-display: swap;
+}
+
 body {
-    font-family: 'Noto Sans';
+    font-family: 'Noto Sans', 'Noto Color Emoji', sans-serif;
     margin: 0
 }
 
@@ -180,10 +193,16 @@ body:focus {
     object-position: left;
 }
 
+/* Flag emoji before a country name: the emoji font, fixed width so names line up */
 .flag {
+    display: inline-block;
+    width: 20px;
     margin-right: 6px;
-    vertical-align: -2px;
-    border-radius: 2px;
+    font-family: 'Noto Color Emoji', sans-serif;
+    font-style: normal;
+    font-weight: normal;
+    line-height: 1;
+    text-align: center;
 }
 
 /* Spinner in place of the flag while a location / its country loads: same width, so the name doesn't move */
@@ -511,4 +530,12 @@ body:focus {
 @keyframes panel-content-in {
     from { opacity: 0; }
     to { opacity: 1; }
+}
+
+/* Copying a location: hide the app's cards and messages while the screenshot is taken, so it's just the view */
+.capturing .panel-stack,
+.capturing .panel,
+.capturing .minimap-floating,
+.capturing .ant-message {
+    visibility: hidden;
 }

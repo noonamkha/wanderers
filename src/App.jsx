@@ -39,7 +39,9 @@ import {
     EyeTwoTone,
     EyeInvisibleTwoTone,
     EyeOutlined,
-    EyeInvisibleOutlined
+    EyeInvisibleOutlined,
+    CameraOutlined,
+    CameraFilled
 } from '@ant-design/icons';
 import { setOptions, importLibrary } from '@googlemaps/js-api-loader';
 import logo from './assets/nu-tetris.svg';
@@ -284,9 +286,12 @@ const ThemeSwitch = () => {
 }
 
 // The country's flag, or a spinner while a new location / its country is being looked up
+// A country's flag emoji (see flagEmoji in gadm.js)
+const Flag = ({ emoji }) => emoji ? <span className="flag" aria-hidden>{emoji}</span> : null;
+
 const CountryFlag = ({ country, busy }) => busy
     ? <LoadingOutlined spin className="flag flag-loading" />
-    : country?.flag ? <img src={country.flag} width={20} height={15} alt="" className="flag" /> : null;
+    : <Flag emoji={country?.flag} />;
 
 // busy: a new location / its country is being looked up (the flag shows a spinner)
 // compact: a single row with the country on the left and the date on the right (minimized phone sheet)
@@ -377,6 +382,49 @@ const EmbedStreetView = ({ apiKey, pano }) => {
             allow="accelerometer; gyroscope; magnetometer"
         />
     );
+}
+
+// Screen capture is the only way to get the Street View's pixels: it's Google's iframe (another site), which
+// the page can't read or draw. Desktop browsers only
+const canCaptureScreen = Boolean(navigator.mediaDevices?.getDisplayMedia);
+
+// Screenshot of this tab as a JPEG data URL. The browser asks which tab to share (this one is offered first);
+// the app's own cards are hidden for the moment of the capture (.capturing in index.css), then sharing stops
+async function captureTab() {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+            displaySurface: 'browser',
+            // Full size (Chrome otherwise sends a smaller video of the tab)
+            width: { ideal: Math.round(window.innerWidth * window.devicePixelRatio) },
+            height: { ideal: Math.round(window.innerHeight * window.devicePixelRatio) },
+        },
+        audio: false,
+        preferCurrentTab: true, // Chrome: offer just this tab
+        selfBrowserSurface: 'include',
+    });
+    const root = document.documentElement;
+    root.classList.add('capturing');
+    try {
+        const video = document.createElement('video');
+        video.muted = true;
+        video.srcObject = stream;
+        await video.play();
+        // Let the page redraw without the cards (and settle after the "sharing this tab" bar appears). A frame
+        // only comes when something on screen changes, so don't wait for one longer than that
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        await new Promise((resolve) => {
+            video.requestVideoFrameCallback(resolve);
+            setTimeout(resolve, 300);
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video, 0, 0);
+        return canvas.toDataURL('image/jpeg', 0.85);
+    } finally {
+        stream.getTracks().forEach((track) => track.stop());
+        root.classList.remove('capturing');
+    }
 }
 
 // Zoom of the mini map until the user picks their own with its zoom field (then remembered)
@@ -642,7 +690,7 @@ function useLocationSearch(onPickResult, { clearOnBlur = false, blurOnPick = fal
                     onClick={() => pickResult(r.path)}
                     onMouseEnter={() => setActive(i)}
                 >
-                    {r.flag && <img src={r.flag} width={20} height={15} alt="" className="flag" />}
+                    <Flag emoji={r.flag} />
                     {r.names.join(' › ')}
                 </div>
             ))}
@@ -909,7 +957,7 @@ const SelectionBreadcrumb = ({ selected, subArea, onPick, isPhone, sheet, setShe
     }, [country]);
 
 
-    const flag = (c) => c.flag && <img src={c.flag} width={20} height={15} alt="" className="flag" />;
+    const flag = (c) => <Flag emoji={c.flag} />;
     const continentTitle = (name) => `${CONTINENT_EMOJI[name] ?? '🌐'} ${name}`;
     const areaOptions = (code) => loaded[code];
     const countryOption = (c) => ({
@@ -1080,6 +1128,7 @@ const Wanderer = () => {
     const mapBoxRef = useRef(null);
     const [panelWidth, setPanelWidth] = useState(() => Number(loadSetting('panelWidth')) || PANEL_MIN_WIDTH); // desktop
     const [loading, setLoading] = useState(false);
+    const [copying, setCopying] = useState(false); // copy button: screenshot + clipboard in progress
     const [coordsInput, setCoordsInput] = useState('');
     // Panel mode, switched with the header button: random (location search + Go = random place) or go to (coordinates + Go)
     const [goMode, setGoMode] = useState(false);
@@ -1281,6 +1330,43 @@ const Wanderer = () => {
         const size = pinnedMapSize ? null : Math.round(mapBoxRef.current.getBoundingClientRect().height);
         setPinnedMapSize(size);
         saveSetting('pinnedMapSize', size ? String(size) : '');
+    }
+
+    // Copy the current location as JSON for notes (e.g. Obsidian): country and its flag emoji, place, coordinates
+    // and a screenshot of the Street View as a JPEG data URL
+    async function handleCopy() {
+        if (!position || copying) return;
+        setCopying(true); // filled camera icon until it's copied (or cancelled)
+        try {
+            await copyLocation();
+        } finally {
+            setCopying(false);
+        }
+    }
+
+    async function copyLocation() {
+        let image;
+        try {
+            image = await captureTab();
+        } catch (e) {
+            console.error(e);
+            messageApi.warning('Screenshot cancelled, nothing copied');
+            return;
+        }
+        const json = JSON.stringify({
+            country: country?.name ?? null,
+            flag: country?.flag ?? null,
+            location: currentData?.location.description || null,
+            coordinates: position,
+            image,
+        }, null, 2);
+        try {
+            await navigator.clipboard.writeText(json);
+            messageApi.success('Location copied');
+        } catch (e) {
+            console.error(e);
+            messageApi.error('Could not write to the clipboard');
+        }
     }
 
     function toggleMap(show) {
@@ -1585,6 +1671,18 @@ const Wanderer = () => {
                 // Hide the mini map to leave more room for the country list
                 countryExtra={
                     <Flex align="center" gap={4}>
+                        {canCaptureScreen && (
+                            <Button
+                                shape="circle"
+                                type="text"
+                                size="large"
+                                className="coords-button"
+                                icon={copying ? <CameraFilled /> : <CameraOutlined />}
+                                onClick={handleCopy}
+                                disabled={!position || loading}
+                                title="Copy location with a screenshot (JSON)"
+                            />
+                        )}
                         {/* <Button
                             shape='circle'
                             type="text"

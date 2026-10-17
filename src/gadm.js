@@ -8,12 +8,14 @@ import index from './gadm-index.json'; // built by scripts/build-gadm-index.mjs
 
 const CONTINENT_ORDER = ['Asia', 'Europe', 'Africa', 'North America', 'South America', 'Oceania', 'Antarctica', 'Other'];
 
-// "VN" -> flag image URL (emoji flags don't render on Windows)
-const flagUrl = (iso2) => `https://flagcdn.com/20x15/${iso2.toLowerCase()}.png`;
+// "VN" -> "🇻🇳" (two regional indicator letters). Drawn with the bundled Noto Color Emoji font (index.css), so
+// flags show on Windows too, which has no flag emoji of its own
+export const flagEmoji = (iso2) =>
+    String.fromCodePoint(...[...iso2.toUpperCase()].map((c) => 0x1F1E6 + c.charCodeAt(0) - 65));
 
 // code -> { code, name, levels, continent, iso2, flag, box: [west, south, east, north] }
 export const COUNTRIES = Object.fromEntries(
-    index.map((c) => [c.code, { ...c, flag: c.iso2 ? flagUrl(c.iso2) : null }])
+    index.map((c) => [c.code, { ...c, flag: c.iso2 ? flagEmoji(c.iso2) : null }])
 );
 
 // [[continent, [country, ...]], ...] in a fixed continent order, countries by name
