@@ -1568,11 +1568,12 @@ const Wanderer = () => {
 
     // Keyboard shortcuts, unless typing in a field (or a button / link has focus, where Space already clicks it):
     // Space = the mode's button (random place, or the coordinates when they're new); S = location search (desktop: the panel's search field, restoring a collapsed
-    // panel first; phone: the location sheet), with the search box focused
+    // panel first; phone: the location sheet), with the search box focused; C = copy the location with a
+    // screenshot (desktop, like the camera button). Not with Ctrl / Cmd, so Ctrl+C still copies selected text
     useEffect(() => {
         const onKeyDown = (e) => {
             if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
-            if (e.code !== 'Space' && e.code !== 'KeyS') return;
+            if (e.code !== 'Space' && e.code !== 'KeyS' && e.code !== 'KeyC') return;
             if (e.target.closest('input, textarea, select, button, a, [contenteditable="true"]')) return;
             e.preventDefault(); // also keeps the "s" out of the search box that's about to get focus
             if (e.code === 'KeyS') {
@@ -1582,6 +1583,10 @@ const Wanderer = () => {
                     setGoMode(false); // the search is in random mode
                     setTimeout(panelSearch.focus, 50); // once a restored panel has its field again
                 }
+                return;
+            }
+            if (e.code === 'KeyC') {
+                if (!isPhone && canCaptureScreen && !loading) handleCopy();
                 return;
             }
             if (loading) return;
